@@ -154,9 +154,9 @@ export type UpdateState = {
   deadline: string | null;
   /** The deadline has passed: the window must not let you carry on without updating. */
   mandatory: boolean;
-  /** This machine relieves itself (an AppImage, a per-user NSIS, a core in the
-   *  home). `false` means a human is needed, which is why there is something to
-   *  show. */
+  /** This machine relieves itself (the app and the core in the user's own
+   *  folders). `false` means a human is needed, which is why there is something
+   *  to show. */
   unattended: boolean;
   last_error: string | null;
 };
@@ -229,9 +229,9 @@ export function semverIsNewer(a: string, b: string): boolean {
 }
 
 /**
- * Result of `apply_desktop_update`. `installer_launched` means we spawned the
- * platform installer (pkexec / msiexec / open); `downloaded` means we got the
- * file onto disk but couldn't launch, the UI tells the user to run it.
+ * Result of `apply_desktop_update`. `installer_launched` means Hoard Setup is
+ * open and takes it from there; `downloaded` means it is on disk but couldn't be
+ * started, and the UI tells the user to run it.
  */
 export type ApplyOutcome =
   | { kind: "installer_launched"; path: string; version: string }

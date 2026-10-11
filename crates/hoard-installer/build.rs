@@ -19,6 +19,28 @@ fn main() {
         res.set("FileDescription", "Hoard Setup");
         res.set("CompanyName", "Hoard");
         res.set("LegalCopyright", "AGPL-3.0");
+        // Windows takes anything whose description says "Setup" for an
+        // installer and demands elevation before it runs, unless the program
+        // states otherwise. Without this, double-clicking it asked for an
+        // administrator to install into the user's own folder, and an older
+        // Hoard's updater, which starts it with no shell to raise the prompt,
+        // got "the requested operation requires elevation" and never updated.
+        res.set_manifest(
+            r#"<assembly xmlns="urn:schemas-microsoft-com:asm.v1" manifestVersion="1.0">
+  <trustInfo xmlns="urn:schemas-microsoft-com:asm.v3">
+    <security>
+      <requestedPrivileges>
+        <requestedExecutionLevel level="asInvoker" uiAccess="false"/>
+      </requestedPrivileges>
+    </security>
+  </trustInfo>
+  <compatibility xmlns="urn:schemas-microsoft-com:compatibility.v1">
+    <application>
+      <supportedOS Id="{8e0f7a12-bfb3-4fe8-b9a5-48fd50a15a9a}"/>
+    </application>
+  </compatibility>
+</assembly>"#,
+        );
         res.compile()
             .expect("embedding the Windows icon and version resource");
     }

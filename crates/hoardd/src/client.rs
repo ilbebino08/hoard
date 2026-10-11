@@ -148,8 +148,8 @@ impl Client {
         // An update is replacing the binaries right now. Starting one here is
         // how a Windows update used to fail: the installer stops `hoardd.exe`,
         // this reconnect brings it back from the old binary two seconds later,
-        // and NSIS then can't write the file it just made room for. Whoever
-        // finishes the swap starts the service (the NSIS post-install hook, or
+        // and the installer then can't write the file it just made room for.
+        // Whoever finishes the swap starts the service (`hoardd::setup`, or
         // `relaunch` on the way out), so waiting is not waiting forever.
         if hoard_agent::install::Swap::in_progress() {
             bail!("Hoard is being updated right now; the service will be back in a moment");
@@ -373,42 +373,82 @@ impl Client {
     }
 }
 
-/// The daemon binary's path, in order of authority: the override, **the one the
-/// installed service runs**, the sibling of the current executable (which is how it
-/// is packaged), and last the `PATH`.
+/// The daemon binary's path, in order of authority: the one an installer
+/// pinned, the override, **the one the installed service runs**, the core in
+/// its place ([`hoard_agent::install::layout`]), and last this executable's
+/// sibling.
 ///
-/// The second step is not a preference: with the app and the terminal installer
-/// living side by side there can be two `hoardd` on disk (the package's in
-/// `/usr/bin`, the tarball's in `~/.local/bin`), and "sibling, else PATH" made the
-/// chosen binary depend on **who** asked, with the app bringing up its own and the
-/// terminal its own. There is only one daemon per user, so there can only be one
-/// answer: the one the service manager already picked. It is the same class of
-/// failure as the old `hoard-server` on the `PATH` eclipsing the good one, solved at
-/// the root instead of by cleaning binaries up by hand.
+/// There used to be two `hoardd` on many machines (the package's in `/usr/bin`,
+/// the tarball's in `~/.local/bin`), and "sibling, else PATH" made the chosen
+/// binary depend on **who** asked. There is only one daemon per user, so there
+/// can only be one answer: the one the service manager already picked, and
+/// failing that, the one the installer put where the core lives.
 pub fn daemon_binary() -> std::path::PathBuf {
-    if let Some(path) = std::env::var_os(DAEMON_BIN_ENV).filter(|v| !v.is_empty()) {
-        return std::path::PathBuf::from(path);
+    if let Some(path) = chosen_daemon_binary() {
+        return path;
     }
     if let Some(path) = crate::autostart::installed_exec_start() {
         if path.is_file() {
             return path;
         }
     }
+    if let Some(path) = layout_daemon() {
+        return path;
+    }
     own_daemon_binary()
 }
 
-/// **This installation's** daemon: the override, this executable's sibling, and
-/// otherwise the `PATH`. Deliberately blind to the installed service.
+/// Pins which `hoardd` this process starts and declares.
 ///
-/// It is what [`crate::autostart`] puts in the `ExecStart`, and that is why it
-/// cannot look at the unit: the unit is what we are declaring. If it did, an update
-/// that moved the binary would rewrite the unit with the **old** path it had just
-/// read, and the service would keep starting the previous binary for ever. Clients
-/// use [`daemon_binary`], which does consult the unit; whoever declares it uses this
-/// one.
+/// An installer calls it with the core it has just put in place, which is not
+/// the installer's sibling. `HOARDD_BIN` would do the same, but setting a
+/// variable is only sound before any thread exists, and an install decides
+/// where the core goes long after the runtime is up.
+pub fn use_daemon_binary(path: std::path::PathBuf) {
+    *PINNED_DAEMON.lock().unwrap_or_else(|e| e.into_inner()) = Some(path);
+}
+
+static PINNED_DAEMON: std::sync::Mutex<Option<std::path::PathBuf>> = std::sync::Mutex::new(None);
+
+/// The daemon somebody chose on purpose: [`use_daemon_binary`], then
+/// `HOARDD_BIN`.
+pub(crate) fn chosen_daemon_binary() -> Option<std::path::PathBuf> {
+    if let Some(path) = PINNED_DAEMON
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .clone()
+    {
+        return Some(path);
+    }
+    std::env::var_os(DAEMON_BIN_ENV)
+        .filter(|v| !v.is_empty())
+        .map(std::path::PathBuf::from)
+}
+
+/// The `hoardd` in the core's directory, when it is there.
+///
+/// Not from inside a Flatpak: the sandbox sees the host's home through
+/// `--filesystem=host`, and starting the host's engine from in there would run
+/// it with the sandbox's idea of where everything is.
+pub fn layout_daemon() -> Option<std::path::PathBuf> {
+    if hoard_agent::install::running_under_flatpak() {
+        return None;
+    }
+    hoard_agent::install::layout::core_binary("hoardd")
+        .ok()
+        .filter(|p| p.is_file())
+}
+
+/// **This installation's** daemon: the pinned one, the override, this
+/// executable's sibling, and otherwise the bare name. Deliberately blind to the
+/// installed service.
+///
+/// It is what a relaunch after an update starts, and that is why it cannot look
+/// at the unit: the update just replaced *this* copy, and the unit may still name
+/// another one.
 pub fn own_daemon_binary() -> std::path::PathBuf {
-    if let Some(path) = std::env::var_os(DAEMON_BIN_ENV).filter(|v| !v.is_empty()) {
-        return std::path::PathBuf::from(path);
+    if let Some(path) = chosen_daemon_binary() {
+        return path;
     }
     let name = format!("hoardd{}", std::env::consts::EXE_SUFFIX);
     if let Ok(exe) = std::env::current_exe() {
@@ -487,7 +527,7 @@ pub fn respawn_service() -> Result<u32> {
 /// The service has to outlive whoever started it, which is the whole point:
 /// closing the app (or Ctrl-C in the CLI) must not kill the sync.
 #[cfg(unix)]
-fn detach(command: &mut std::process::Command) {
+pub(crate) fn detach(command: &mut std::process::Command) {
     use std::os::unix::process::CommandExt;
     // SAFETY: `setsid` es async-signal-safe y no toca memoria del padre, que es
     // exactamente lo que `pre_exec` exige.
@@ -503,7 +543,7 @@ fn detach(command: &mut std::process::Command) {
 }
 
 #[cfg(windows)]
-fn detach(command: &mut std::process::Command) {
+pub(crate) fn detach(command: &mut std::process::Command) {
     use std::os::windows::process::CommandExt;
     use windows_sys::Win32::System::Threading::{CREATE_NO_WINDOW, DETACHED_PROCESS};
     // Sin consola y sin heredar la del cliente: si el desktop lo lanza no debe

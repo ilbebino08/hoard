@@ -1105,6 +1105,7 @@ export type InstallChannel = {
     | "system"
     | "msi"
     | "nsis"
+    | "setup"
     | "mac_app"
     | "dev"
     | "unknown";

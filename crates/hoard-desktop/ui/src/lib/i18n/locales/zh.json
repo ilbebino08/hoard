@@ -617,7 +617,7 @@
   "updates.yes": "是",
   "updates.no": "否",
   "updates.installing": "正在安装…",
-  "updates.installer_launched": "安装程序已启动，按系统提示完成。",
+  "updates.installer_launched": "Hoard Setup 已打开，请在其中完成更新。",
   "updates.superseded": "操作已取消：有更新的版本（{latest}）可用。请再次更新以安装它。",
   "updates.downloaded_manual": "已下载到 {path}。打开以安装。",
   "updates.install_failed": "更新失败：{error}",

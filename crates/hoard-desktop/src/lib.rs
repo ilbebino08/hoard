@@ -468,11 +468,10 @@ pub fn run() {
                 // `set_service_autostart`; the terminal reads and moves the same
                 // one with `hoard sync autostart`. Neither reaffirms the other.
 
-                // And the third leg: recording which components this machine has,
-                // and making `hoard` typeable in a terminal. It goes here because
-                // whoever installs the app from the web never goes through `hoard
-                // install`.
-                commands::prefs::register_installation();
+                // A machine still carrying a package from an older release gets
+                // Hoard Setup to finish moving it: removing a package needs a
+                // password, and only a window can ask for one.
+                commands::prefs::finish_older_install();
 
                 // Silent start: the autostart entry launches Hoard with `--silent`
                 // (see the plugin's init above), so at login the app stays in the

@@ -3898,6 +3898,7 @@ dependencies = [
  "slint-build",
  "sys-locale",
  "tokio",
+ "windows-sys 0.59.0",
  "winresource",
 ]
 

@@ -1,8 +1,19 @@
 name: Release (desktop)
 
-# Runs alongside `release.yml` on the same `v*.*.*` tag. The server release
-# workflow handles the headless tarball; this one packages the Tauri desktop
-# app into native installers and uploads them as additional release assets.
+# Runs alongside `release.yml` on the same `v*.*.*` tag. That one publishes the
+# core tarballs; this one publishes Hoard Setup and the app, under the fixed
+# names `hoard_agent::install::fetch` builds from the version:
+#
+#   hoard-desktop-<v>-linux-<arch>.AppImage
+#   hoard-desktop-<v>-windows-<arch>.exe
+#   hoard-desktop-<v>-macos-<arch>.dmg
+#   HoardSetup-<arch>[.exe|.zip]
+#
+# Plus what Hoard up to 1.2.1 looks for to update itself, so those machines can
+# reach this release and be moved: the `.deb` and `.rpm` as before, and Hoard
+# Setup again under the old Windows installer's name (`Hoard_<v>_<x64|arm64>-
+# setup.exe`), which those updaters run with `/S`. Neither is offered on the
+# download page.
 #
 # Code signing isn't wired in for v0.2, Linux/Windows/macOS users will see
 # their OS's "unverified developer" warning on first run. See
@@ -52,22 +63,22 @@ jobs:
             target: aarch64-unknown-linux-gnu
             args: ""
             setup_arch: aarch64
+          # Windows has no bundle any more: the app is one executable that Hoard
+          # Setup puts in place, so the build stops at `--no-bundle`.
           - os: windows-latest
             label: windows-x86_64
             target: x86_64-pc-windows-msvc
             args: ""
             setup_arch: x86_64
-          # ARM Windows. NSIS only, and deliberately: WiX's arm64 support is the
-          # shakier half of the bundler, and NSIS is the installer the updater
-          # reaches for first anyway, it carries the hook that stops a running
-          # `hoardd` before overwriting it (see `install::fetch`). Optional
-          # while it is new: a failure here leaves the release short one bundle
-          # instead of holding up the other five.
+            legacy_arch: x64
+          # ARM Windows. Optional while it is new: a failure here leaves the
+          # release short one build instead of holding up the others.
           - os: windows-11-arm
             label: windows-aarch64
             target: aarch64-pc-windows-msvc
-            args: "--bundles nsis"
+            args: ""
             setup_arch: aarch64
+            legacy_arch: arm64
             optional: true
           # Apple-silicon only, macos-13 (x86_64) is being retired by
           # GitHub and queues for the legacy intel image stall for hours,
@@ -171,6 +182,7 @@ jobs:
         run: pnpm --dir crates/hoard-desktop/ui install --frozen-lockfile
 
       - name: Build desktop bundle
+        if: runner.os != 'Windows'
         uses: tauri-apps/tauri-action@1deb371b0cd8bd54025b384f1cd735e725c4060f # v1.0.0
         env:
           # When we set up code signing, these are the env vars the Tauri
@@ -194,10 +206,17 @@ jobs:
           tagName: ""
           releaseName: ""
 
+      # The Windows app: the executable alone, frontend included. Not through
+      # tauri-action, which fails a build that produces no bundle.
+      - name: Build the app (Windows)
+        if: runner.os == 'Windows'
+        shell: bash
+        working-directory: crates/hoard-desktop
+        run: npx --yes @tauri-apps/cli@2 build --no-bundle --target ${{ matrix.target }}
+
       # Hoard Setup: the graphical installer, which is a separate binary from
-      # the app and not a Tauri bundle at all. It is what the download page
-      # hands people; the packages below stay published for anyone who would
-      # rather drive their own package manager.
+      # the app and not a Tauri bundle at all. It is the only thing the
+      # download page hands people.
       #
       # Named `HoardSetup-*` and nothing else: `hoard_agent::install::fetch`
       # filters the release's assets on that prefix so the in-app updater can
@@ -220,12 +239,9 @@ jobs:
             perl -0pi -e "s/^version = \"[^\"]+\"/version = \"$V\"/m" \
               crates/hoard-installer/Cargo.toml
           fi
-          # `--target`, never `matrix.args`: those are the *bundler's* flags.
-          # The ARM Windows entry passes `--bundles nsis`, which cargo rejects
-          # outright, and it did so after the app's bundle had already built, so
-          # the job died on its way to the upload and the arm64 release shipped
-          # neither installer. Naming the target also puts the binary where the
-          # step below looks for it first, on every platform.
+          # `--target`, never `matrix.args`: those are the *bundler's* flags, and
+          # cargo rejects them outright. Naming the target also puts the binary
+          # where the step below looks for it first, on every platform.
           cargo build -p hoard-installer --release --target ${{ matrix.target }}
 
       - name: Package Hoard Setup
@@ -244,6 +260,12 @@ jobs:
           case "${{ runner.os }}" in
             Windows)
               cp "$BIN.exe" "setup/HoardSetup-$ARCH.exe"
+              # The same program under the old installer's name, for the
+              # updaters of 1.1.4 to 1.2.1 (see the header).
+              if [ "${{ github.ref_type }}" = "tag" ]; then
+                V="${GITHUB_REF_NAME#v}"
+                cp "$BIN.exe" "setup/Hoard_${V}_${{ matrix.legacy_arch }}-setup.exe"
+              fi
               ;;
             Linux)
               # A bare executable, deliberately. The binary is already static
@@ -295,6 +317,9 @@ jobs:
         run: |
           set -e
           mkdir -p dist
+          V="${GITHUB_REF_NAME#v}"
+          [ "${{ github.ref_type }}" = "tag" ] || V="dev"
+          OS_ARCH="${{ matrix.setup_arch }}"
           # Tauri spits everything into target/<triple>/release/bundle/<format>/
           BUNDLE_ROOT="target/${{ matrix.target }}/release/bundle"
           # Linux bundles can also live under target/release/bundle when no
@@ -302,12 +327,24 @@ jobs:
           if [ ! -d "$BUNDLE_ROOT" ]; then
             BUNDLE_ROOT="target/release/bundle"
           fi
-          echo "Looking under $BUNDLE_ROOT"
-          find "$BUNDLE_ROOT" -type f \
-            \( -name '*.deb' -o -name '*.rpm' -o -name '*.AppImage' \
-               -o -name '*.msi' -o -name '*.exe' \
-               -o -name '*.dmg' -o -name '*.app.tar.gz' \) \
-            -exec cp -v {} dist/ \; || true
+          case "${{ runner.os }}" in
+            Linux)
+              # The `.deb` and `.rpm` keep the bundler's names: they are only for
+              # the old updaters, which find them by suffix.
+              find "$BUNDLE_ROOT" -type f \( -name '*.deb' -o -name '*.rpm' \) \
+                -exec cp -v {} dist/ \;
+              APPIMAGE="$(find "$BUNDLE_ROOT" -type f -name '*.AppImage' | head -1)"
+              cp -v "$APPIMAGE" "dist/hoard-desktop-$V-linux-$OS_ARCH.AppImage"
+              ;;
+            Windows)
+              EXE="target/${{ matrix.target }}/release/hoard-desktop.exe"
+              cp -v "$EXE" "dist/hoard-desktop-$V-windows-$OS_ARCH.exe"
+              ;;
+            macOS)
+              DMG="$(find "$BUNDLE_ROOT" -type f -name '*.dmg' | head -1)"
+              cp -v "$DMG" "dist/hoard-desktop-$V-macos-$OS_ARCH.dmg"
+              ;;
+          esac
           # Hoard Setup rides along so `publish` signs it and hashes it with
           # everything else, that job works on whatever is in `dist/`.
           cp setup/* dist/ 2>/dev/null || true
@@ -344,21 +381,18 @@ jobs:
           merge-multiple: true
       - name: List
         run: ls -la dist/
-      # Sign every installer with minisign so the in-app auto-updater
-      # (`apply_desktop_update`) can verify it against the public key embedded
-      # in the client before running it as root via pkexec, same key and
-      # fail-closed model the server's `hoard-server upgrade` uses (ADR 0017).
-      # The secret lives only in repo secrets. If it isn't configured we warn
-      # loudly: unsigned installers make the client fall back to a *manual*
-      # download instead of auto-installing, so updates degrade rather than run
-      # an unverified binary.
+      # Sign every file with minisign: nothing downloads and runs one of these
+      # without checking it against the public key embedded in the client
+      # (`hoard_agent::install::fetch`), same key and fail-closed model the
+      # server's `hoard-server upgrade` uses (ADR 0017). The secret lives only
+      # in repo secrets. Without it nothing published here installs.
       - name: Sign bundles (minisign)
         env:
           MINISIGN_SECRET_KEY: ${{ secrets.MINISIGN_SECRET_KEY }}
           MINISIGN_KEY_PASSWORD: ${{ secrets.MINISIGN_KEY_PASSWORD }}
         run: |
           if [ -z "${MINISIGN_SECRET_KEY:-}" ]; then
-            echo "::warning::MINISIGN_SECRET_KEY not set — desktop installers will be UNSIGNED. The in-app updater will refuse to auto-install them and fall back to manual download."
+            echo "::warning::MINISIGN_SECRET_KEY not set — nothing in this release will install: every client refuses an unsigned file."
             exit 0
           fi
           sudo apt-get update && sudo apt-get install -y minisign

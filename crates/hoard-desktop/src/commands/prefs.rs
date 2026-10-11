@@ -197,53 +197,47 @@ pub async fn set_autostart(app: AppHandle, enabled: bool) -> Result<bool, String
     Ok(actually_enabled)
 }
 
-/// Writes this install into the manifest and leaves the terminal within reach.
+/// Finishes moving an install from an older release, with somebody there.
 ///
-/// The two halves of "installing the app installs the whole of Hoard", and both have
-/// to run **here** and not in the installer: somebody who downloads the `.deb` from
-/// the web never goes through `hoard install`, so if the app did not do this, that
-/// machine would be left with no manifest (and its first `upgrade` would not know
-/// what it updates) and with the terminal inside the bundle, present but
-/// unwritable.
+/// The service moves what it can on its own (`hoardd::setup::Health`), but a
+/// `.deb`, an `.rpm` or an MSI only come off with an administrator's password,
+/// and asking for one needs a window. So when the app opens on such a machine it
+/// hands over to Hoard Setup, which asks once, finishes the move and opens the
+/// app again. Once a day at most: a prompt somebody cancelled doesn't come back
+/// every time they open the app.
 ///
-/// In the background and best-effort: neither half may delay or bring down the
-/// window's start.
-pub(crate) fn register_installation() {
+/// In the background and best-effort: it may not delay or bring down the
+/// window's start. Never from a development build, which is not an install.
+pub(crate) fn finish_older_install() {
+    if cfg!(debug_assertions) {
+        return;
+    }
     tauri::async_runtime::spawn(async move {
-        match hoard_agent::install::Manifest::reconcile() {
-            Ok(m) => tracing::info!(
-                components = m
-                    .components
-                    .iter()
-                    .map(|c| c.as_str())
-                    .collect::<Vec<_>>()
-                    .join(","),
-                delivery = m.delivery.map(|d| d.as_str()).unwrap_or("-"),
-                "install manifest reconciled"
-            ),
-            Err(err) => {
-                tracing::warn!(error = %format!("{err:#}"), "couldn't reconcile the install manifest")
-            }
+        let health = hoardd::setup::health().await;
+        if !health.needs_admin() {
+            return;
         }
-        use hoard_agent::install::CliReach;
-        match hoard_agent::install::ensure_cli_reachable() {
-            Ok(CliReach::AddedToPath(dir)) => tracing::info!(
-                dir = %dir.display(),
-                "added the bundled `hoard` command to the user PATH (needs a new terminal)"
-            ),
-            Ok(CliReach::Linked(path)) => {
-                tracing::info!(path = %path.display(), "linked the bundled `hoard` command")
-            }
-            Ok(CliReach::AlreadyReachable) | Ok(CliReach::NotBundled) => {}
-            // The expected AppImage case: its copy would disappear when the app
-            // closed, so there the core installer is what puts the terminal in
-            // place.
-            Ok(CliReach::Unreachable(why)) => {
-                tracing::info!(reason = %why, "the bundled `hoard` command stays out of PATH")
-            }
-            Err(err) => {
-                tracing::warn!(error = %format!("{err:#}"), "couldn't make `hoard` reachable")
-            }
+        let Ok(marker) =
+            hoard_agent::config::CliConfig::state_dir().map(|d| d.join("setup-repair-asked"))
+        else {
+            return;
+        };
+        let recent = std::fs::metadata(&marker)
+            .and_then(|m| m.modified())
+            .ok()
+            .and_then(|at| at.elapsed().ok())
+            .is_some_and(|age| age < std::time::Duration::from_secs(24 * 3600));
+        if recent {
+            return;
+        }
+        let _ = std::fs::write(&marker, b"");
+        tracing::info!(reason = %health.describe(), "an older install needs an administrator; opening Hoard Setup");
+        let launched = match hoardd::setup::fetch_setup(hoard_agent::update::current()).await {
+            Ok(exe) => hoardd::setup::launch_setup(&exe, &["--repair"]),
+            Err(err) => Err(err),
+        };
+        if let Err(err) = launched {
+            tracing::warn!(error = %format!("{err:#}"), "couldn't open Hoard Setup to finish the move");
         }
     });
 }

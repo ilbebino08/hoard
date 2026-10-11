@@ -6,8 +6,8 @@
 //! - [`stage`] downloads and verifies a version's files into a directory of their
 //!   own. It touches nothing installed, so it can run with a game open, with the
 //!   app closed, and fail halfway with no consequences.
-//! - [`apply`] puts them in place. That is the short part, renaming two binaries
-//!   or running an installer, and the only one that needs the moment to be right.
+//! - [`apply`] puts them in place. That is the short part, a few renames, and the
+//!   only one that needs the moment to be right.
 //!
 //! Splitting it that way is what makes "update when you open it" something that
 //! can be promised: by the time you open it there is no download left, only a
@@ -21,12 +21,12 @@
 //! looking inside. Every file is checked against the release key before it is
 //! written, so nothing unsigned ever sits in `staged/`.
 
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 
 use anyhow::{bail, Context, Result};
 
 use super::fetch;
-use super::{Component, Delivery, Manifest};
+use super::{layout, Component, Delivery, Manifest};
 
 /// Where a version's downloads are kept.
 pub fn dir(version: &str) -> Result<PathBuf> {
@@ -39,94 +39,74 @@ pub fn dir(version: &str) -> Result<PathBuf> {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Staged {
     pub version: String,
-    /// The core tarball. `None` when the core is not ours (it travels inside the
-    /// app bundle, whose installer relieves it).
-    pub core: Option<PathBuf>,
-    /// The app installer. `None` on a machine with no app.
+    /// The core tarball. Always: the core is the one piece every install has.
+    pub core: PathBuf,
+    /// The app. `None` on a machine with no app.
     pub desktop: Option<PathBuf>,
+    /// Hoard Setup, on Windows: the copy "Installed apps" runs to uninstall is
+    /// refreshed with every update, so it never removes a newer Hoard with an
+    /// older idea of where things are.
+    pub setup: Option<PathBuf>,
 }
 
-impl Staged {
-    /// Is there anything to apply? An empty `Staged` means this install has none
-    /// of our pieces, and applying it would bump the manifest's version number
-    /// without a single binary having been touched.
-    pub fn is_empty(&self) -> bool {
-        self.core.is_none() && self.desktop.is_none()
+/// Which app route this install updates, if it has an app.
+///
+/// An install from before the layout (a `.deb`, the NSIS folder) is not updated
+/// in place: it is repaired, by Hoard Setup, which moves it. Staging an update
+/// for it would download files this machine has nowhere to put.
+fn wanted(manifest: &Manifest) -> Result<Option<Delivery>> {
+    if !manifest.has(Component::Desktop) {
+        return Ok(None);
     }
+    let d = manifest
+        .delivery
+        .context("the manifest says there's an app here but not how it got here")?;
+    if !d.is_ours() {
+        bail!(
+            "this install is managed by your package manager ({})",
+            d.as_str()
+        );
+    }
+    if d.is_legacy() {
+        bail!(
+            "this install predates the current layout ({}); it needs a repair, not an update",
+            d.as_str()
+        );
+    }
+    Ok(Some(d))
 }
 
-/// Which files this install needs in order to move to `version`.
-fn wanted(version: &str, manifest: &Manifest) -> Result<(bool, Option<Delivery>)> {
-    // We relieve the core ourselves unless the bundle brings it.
-    let core = !manifest.core_from_bundle;
-    let desktop = if manifest.has(Component::Desktop) {
-        let d = manifest
-            .delivery
-            .context("the manifest says there's an app here but not how it got here")?;
-        if !d.is_ours() {
-            bail!(
-                "this install is managed by your package manager ({})",
-                d.as_str()
-            );
-        }
-        Some(d)
-    } else {
-        None
-    };
-    if !core && desktop.is_none() {
-        bail!("nothing here is ours to update for {version}");
-    }
-    Ok((core, desktop))
+fn setup_wanted() -> bool {
+    cfg!(windows)
 }
 
 /// What is already downloaded for `version`, if it is complete.
 ///
 /// Complete matters: a download cut in half leaves the core tarball and not the
-/// app installer, and taking it for good would apply half an update. A missing
-/// file counts as nothing being there, and it gets downloaded again.
+/// app, and taking it for good would apply half an update. A missing file counts
+/// as nothing being there, and it gets downloaded again.
 pub fn already_staged(version: &str, manifest: &Manifest) -> Option<Staged> {
-    let (want_core, want_desktop) = wanted(version, manifest).ok()?;
+    let delivery = wanted(manifest).ok()?;
     let dir = dir(version).ok()?;
-
-    let core = if want_core {
-        let name = fetch::core_asset_name(version)?;
+    let present = |name: String| {
         let path = dir.join(name);
-        if !path.is_file() {
-            return None;
-        }
-        Some(path)
+        path.is_file().then_some(path)
+    };
+    let core = present(fetch::core_asset_name(version)?)?;
+    let desktop = match delivery {
+        Some(d) => Some(present(fetch::app_asset_name(d, version)?)?),
+        None => None,
+    };
+    let setup = if setup_wanted() {
+        Some(present(fetch::setup_asset_name()?)?)
     } else {
         None
     };
-
-    let desktop = match want_desktop {
-        Some(_) => {
-            // The bundle's exact name is unknown without listing the release, so
-            // the one file that is not the core tarball is accepted.
-            let core_name = core
-                .as_ref()
-                .and_then(|p| p.file_name().map(|s| s.to_owned()));
-            let mut others = std::fs::read_dir(&dir)
-                .ok()?
-                .filter_map(|e| e.ok())
-                .map(|e| e.path())
-                .filter(|p| p.is_file())
-                .filter(|p| p.file_name().map(|n| Some(n.to_owned()) != core_name) == Some(true));
-            let found = others.next()?;
-            if others.next().is_some() {
-                // Two candidates: there is no telling which. Re-downloading is
-                // cheap and guessing wrong runs an installer that wasn't it.
-                return None;
-            }
-            Some(found)
-        }
-        None => None,
-    };
-
     Some(Staged {
         version: version.trim_start_matches('v').to_string(),
         core,
         desktop,
+        setup,
     })
 }
 
@@ -139,105 +119,76 @@ pub async fn stage(version: &str, manifest: &Manifest) -> Result<Staged> {
     if let Some(done) = already_staged(&version, manifest) {
         return Ok(done);
     }
-
-    let (want_core, want_desktop) = wanted(&version, manifest)?;
+    let delivery = wanted(manifest)?;
     let dir = dir(&version)?;
-    std::fs::create_dir_all(&dir).with_context(|| format!("creating {}", dir.display()))?;
 
-    let (released, assets) = fetch::release_assets(Some(&version)).await?;
-    if released != version {
-        // The same guard as `hoard install`: downloading "something else" breaks
-        // the one guarantee all of this gives, that the pieces move together.
-        bail!("asked GitHub for {version} but the release is {released}");
-    }
-
-    let core = if want_core {
-        let asset = fetch::core_asset_for(&version, &assets).with_context(|| {
-            format!(
-                "release {version} publishes no core tarball for {}-{}",
-                std::env::consts::OS,
-                std::env::consts::ARCH
-            )
-        })?;
-        Some(fetch::download_verified(asset, &assets, &dir).await?)
-    } else {
-        None
-    };
-
-    let desktop = match want_desktop {
-        Some(delivery) => {
-            let asset = fetch::asset_for(delivery, &assets).with_context(|| {
-                format!(
-                    "release {version} publishes no {} package",
-                    delivery.as_str()
-                )
-            })?;
-            Some(fetch::download_verified(asset, &assets, &dir).await?)
-        }
+    let core_name = fetch::core_asset_name(&version).with_context(|| {
+        format!(
+            "no core build for {}-{}",
+            std::env::consts::OS,
+            std::env::consts::ARCH
+        )
+    })?;
+    let core = fetch::download_named(&version, &core_name, &dir).await?;
+    let desktop = match delivery {
+        Some(d) => Some(fetch::download_app(d, &version, &dir).await?),
         None => None,
     };
-
+    let setup = match fetch::setup_asset_name().filter(|_| setup_wanted()) {
+        Some(name) => Some(fetch::download_named(&version, &name, &dir).await?),
+        None => None,
+    };
     Ok(Staged {
         version,
         core,
         desktop,
+        setup,
     })
 }
 
 /// Puts what was downloaded in place and records the new version in the manifest.
 ///
-/// The order is [`super`]'s: the core first, because the other pieces depend on
-/// it, and because it is the one that applies without being able to fail on a
-/// human cancellation. If the app then fails, on a `pkexec` the user cancels, the
-/// manifest does not move up a version: it keeps pointing at the old one and the
-/// next cycle retries the whole thing. Recording a version that only reached half
-/// the pieces is manufacturing the silent mismatch this exists to prevent.
-///
-/// `noninteractive` shuts off any route that could stop to ask. The service always
-/// sets it: it has no window to draw a dialog in, so a `pkexec` launched from
-/// there would wait forever.
-pub async fn apply(staged: &Staged, manifest: &mut Manifest, noninteractive: bool) -> Result<()> {
-    if staged.is_empty() {
-        bail!("there is nothing staged for {}", staged.version);
-    }
-
-    // From here to the end of this function the binaries on disk are in motion,
-    // and a client that starts a service off them would either run half an update
-    // or, on Windows, hold open the very file the installer is trying to write.
-    // The guard is what tells those clients to sit still.
+/// The core first, because the other pieces depend on it. Nothing here asks for
+/// privileges or for anybody's attention: every piece goes into the user's own
+/// directories, which is what lets the service do this with the app closed.
+pub async fn apply(staged: &Staged, manifest: &mut Manifest) -> Result<()> {
+    // From here to the end the binaries on disk are in motion, and a client that
+    // starts a service off them would run half an update. The guard is what tells
+    // those clients to sit still.
     let _swap = super::Swap::begin();
 
-    if let Some(tarball) = &staged.core {
-        let dir = manifest
-            .core_dir
-            .clone()
-            .or_else(|| {
-                std::env::current_exe()
-                    .ok()
-                    .and_then(|e| e.parent().map(Path::to_path_buf))
-            })
-            .context("don't know where the core lives on this machine")?;
-        let written = fetch::apply_core(tarball, &dir).await?;
-        tracing::info!(
-            version = %staged.version,
-            files = ?written,
-            "update: core replaced"
-        );
-        manifest.core_dir = Some(dir);
-    }
+    let core_dir = layout::core_dir()?;
+    let written = fetch::apply_core(&staged.core, &core_dir).await?;
+    tracing::info!(
+        version = %staged.version,
+        files = ?written,
+        "update: core replaced"
+    );
+    manifest.core_dir = Some(core_dir);
 
-    if let Some(installer) = &staged.desktop {
+    if let Some(file) = &staged.desktop {
         let delivery = manifest
             .delivery
             .context("the manifest says there's an app here but not how it got here")?;
-        let path = fetch::apply_desktop(delivery, installer, noninteractive).await?;
+        let path = fetch::apply_desktop(delivery, file).await?;
         tracing::info!(
             version = %staged.version,
             delivery = delivery.as_str(),
             path = %path.display(),
             "update: desktop replaced"
         );
+        #[cfg(windows)]
+        if let Err(err) = super::windows::register(&path, &staged.version, false).await {
+            tracing::warn!(error = %format!("{err:#}"), "update: couldn't refresh the Windows entries");
+        }
         manifest.desktop_path = Some(path);
+    }
+
+    #[cfg(windows)]
+    if let Some(setup) = &staged.setup {
+        if let Err(err) = super::windows::keep_setup_copy(setup) {
+            tracing::warn!(error = %format!("{err:#}"), "update: couldn't refresh the uninstaller");
+        }
     }
 
     manifest.version.clone_from(&staged.version);
@@ -270,7 +221,7 @@ pub fn sweep(keep: &str) {
 mod tests {
     use super::*;
 
-    fn manifest(desktop: Option<Delivery>, core_from_bundle: bool) -> Manifest {
+    fn manifest(desktop: Option<Delivery>) -> Manifest {
         let mut components = vec![Component::Core];
         if desktop.is_some() {
             components.push(Component::Desktop);
@@ -281,42 +232,35 @@ mod tests {
             delivery: desktop,
             core_dir: None,
             desktop_path: None,
-            core_from_bundle,
         }
     }
 
     #[test]
     fn a_headless_box_only_wants_the_core() {
-        let (core, desktop) = wanted("1.1.0", &manifest(None, false)).unwrap();
-        assert!(core);
-        assert_eq!(desktop, None);
+        assert_eq!(wanted(&manifest(None)).unwrap(), None);
     }
 
     #[test]
-    fn a_desktop_box_wants_both() {
-        let (core, desktop) = wanted("1.1.0", &manifest(Some(Delivery::AppImage), false)).unwrap();
-        assert!(core);
-        assert_eq!(desktop, Some(Delivery::AppImage));
+    fn a_desktop_box_wants_its_app_too() {
+        assert_eq!(
+            wanted(&manifest(Some(Delivery::AppImage))).unwrap(),
+            Some(Delivery::AppImage)
+        );
     }
 
+    /// The machine that started this: a `.deb` from 1.2.1. It has nothing to
+    /// stage; it has a repair to run.
     #[test]
-    fn a_bundled_core_rides_the_app_installer() {
-        let (core, desktop) = wanted("1.1.0", &manifest(Some(Delivery::Deb), true)).unwrap();
-        assert!(!core, "the .deb brings the core with it");
-        assert_eq!(desktop, Some(Delivery::Deb));
+    fn an_old_package_is_repaired_not_updated() {
+        for d in [Delivery::Deb, Delivery::Rpm, Delivery::Nsis, Delivery::Msi] {
+            let err = wanted(&manifest(Some(d))).unwrap_err();
+            assert!(format!("{err:#}").contains("repair"), "{d:?}: {err:#}");
+        }
     }
 
     #[test]
     fn a_managed_install_has_nothing_to_stage() {
-        assert!(wanted("1.1.0", &manifest(Some(Delivery::Managed), true)).is_err());
-    }
-
-    #[test]
-    fn a_bundled_core_with_no_app_is_a_contradiction() {
-        // `core_from_bundle` with no `Desktop` leaves none of our pieces: there
-        // is nothing to download, and saying so here avoids creating an empty
-        // directory and "applying" it to bump the manifest version for nothing.
-        assert!(wanted("1.1.0", &manifest(None, true)).is_err());
+        assert!(wanted(&manifest(Some(Delivery::Managed))).is_err());
     }
 
     #[test]
@@ -329,17 +273,5 @@ mod tests {
             "{a:?}"
         );
         assert_ne!(a, dir("1.1.1").unwrap());
-    }
-
-    #[tokio::test]
-    async fn applying_nothing_is_an_error_not_a_version_bump() {
-        let mut m = manifest(None, false);
-        let empty = Staged {
-            version: "1.1.0".into(),
-            core: None,
-            desktop: None,
-        };
-        assert!(apply(&empty, &mut m, true).await.is_err());
-        assert_eq!(m.version, "1.0.0");
     }
 }

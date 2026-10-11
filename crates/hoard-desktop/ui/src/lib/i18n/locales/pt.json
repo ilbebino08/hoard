@@ -617,7 +617,7 @@
   "updates.yes": "Sim",
   "updates.no": "Não",
   "updates.installing": "A instalar…",
-  "updates.installer_launched": "Instalador iniciado, segue o prompt do sistema para terminar.",
+  "updates.installer_launched": "O Hoard Setup está aberto, termina a atualização lá.",
   "updates.superseded": "Operação cancelada: há uma versão mais recente ({latest}) disponível. Atualiza de novo para instalá-la.",
   "updates.downloaded_manual": "Transferido para {path}. Abre para instalar.",
   "updates.install_failed": "Atualização falhou: {error}",

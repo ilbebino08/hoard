@@ -136,15 +136,24 @@ pub fn unsupported_reason(err: &anyhow::Error) -> Option<Unsupported> {
     err.downcast_ref::<LoginStartUnsupported>().map(|u| u.kind)
 }
 
-/// The binary the unit runs: **this** installation's `hoardd`, the one travelling
-/// beside whoever declares the unit (the desktop bundle packages it as
-/// `externalBin`, the tarball puts it next to `hoard`), and otherwise the `PATH`'s.
+/// The binary the unit runs: the one an installer pinned, else the core in its
+/// place ([`hoard_agent::install::layout`]), else the `hoardd` beside whoever
+/// declares the unit, else the `PATH`'s.
+///
+/// The core comes before the sibling because the app still carries a copy of
+/// the engine inside its bundle, and a unit declared from the app's Settings
+/// used to point at that copy: the one no update ever touched.
 ///
 /// Deliberately blind to whatever unit was already there: see
 /// [`crate::client::own_daemon_binary`]. Whoever asks "which is this machine's
 /// daemon?" uses [`crate::client::daemon_binary`], which starts from exactly what
 /// gets written here.
 pub fn service_binary() -> PathBuf {
+    if crate::client::chosen_daemon_binary().is_none() {
+        if let Some(core) = crate::client::layout_daemon() {
+            return core;
+        }
+    }
     let own = crate::client::own_daemon_binary();
     resolve_on_path(&own, std::env::var_os("PATH").as_deref()).unwrap_or(own)
 }
@@ -276,52 +285,6 @@ pub async fn ensure_installed() -> Result<Installed> {
     Ok(installed)
 }
 
-// ---- after an uninstall that was half a reinstall
-
-/// Left in the config directory by `NSIS_HOOK_POSTUNINSTALL` when it removed a
-/// login start that was there. See `installer-hooks.nsh`.
-const RECLAIM_MARKER: &str = "login-start-removed";
-
-/// A reinstall by hand runs its install minutes after the uninstall. A marker
-/// older than this is a real uninstall followed, much later, by a fresh
-/// install, and a fresh install starts with login start off like any other.
-const RECLAIM_WINDOW: Duration = Duration::from_secs(60 * 60);
-
-/// Puts login start back when the uninstall that removed it was the first half
-/// of a reinstall. The marker goes either way, before acting, so a failure here
-/// is one warning and not one per start.
-pub async fn reclaim_after_reinstall() {
-    let Some(path) = hoard_agent::config::CliConfig::project_dirs()
-        .ok()
-        .map(|dirs| dirs.config_dir().join(RECLAIM_MARKER))
-    else {
-        return;
-    };
-    let Ok(meta) = std::fs::metadata(&path) else {
-        return;
-    };
-    let age = meta.modified().ok().and_then(|at| at.elapsed().ok());
-    let _ = std::fs::remove_file(&path);
-    if !within_reclaim_window(age) {
-        tracing::info!("autostart: stale uninstall marker, login start stays off");
-        return;
-    }
-    match ensure_installed().await {
-        Ok(installed) => tracing::info!(
-            manager = installed.manager,
-            "autostart: login start restored after a reinstall"
-        ),
-        Err(err) => tracing::warn!(
-            error = %format!("{err:#}"),
-            "autostart: couldn't restore login start after a reinstall"
-        ),
-    }
-}
-
-fn within_reclaim_window(age: Option<Duration>) -> bool {
-    age.is_some_and(|age| age < RECLAIM_WINDOW)
-}
-
 /// The binary going into the `ExecStart` has to exist *before* the unit is written.
 /// It accepts an absolute path that is a file, or a bare name the `PATH` resolves,
 /// which is the same test the service manager will apply when it starts it. Anything
@@ -407,6 +370,18 @@ pub async fn restart() -> Result<Installed> {
     Ok(installed)
 }
 
+/// Stops the service through its manager, leaving login start as it was. An
+/// installer needs this rather than a `Shutdown`: launchd's `KeepAlive` would
+/// start the old binary again the moment it exited.
+pub async fn stop() {
+    if !installed().await {
+        return;
+    }
+    if let Err(err) = platform::stop().await {
+        tracing::debug!(error = %format!("{err:#}"), "autostart: the service manager didn't stop it");
+    }
+}
+
 /// Is there a unit installed for this user?
 pub async fn installed() -> bool {
     if hoard_agent::config::profile_suffix().is_some() {
@@ -476,7 +451,8 @@ async fn start_now() -> Result<()> {
     wait_until_serving().await
 }
 
-async fn wait_until_serving() -> Result<()> {
+/// Waits for a daemon to answer on the endpoint, up to [`START_TIMEOUT`].
+pub async fn wait_until_serving() -> Result<()> {
     let endpoint = Endpoint::resolve().context("resolving the hoardd endpoint")?;
     let deadline = Instant::now() + START_TIMEOUT;
     loop {
@@ -760,6 +736,14 @@ mod platform {
         if !run_quiet("systemctl", &["--user", "start", UNIT]).await? {
             anyhow::bail!("`systemctl --user start {UNIT}` failed, see `hoard sync`");
         }
+        Ok(())
+    }
+
+    pub async fn stop() -> Result<()> {
+        if flatpak::active() {
+            return Ok(());
+        }
+        run_quiet("systemctl", &["--user", "stop", UNIT]).await?;
         Ok(())
     }
 
@@ -1048,6 +1032,19 @@ mod platform {
         Ok(())
     }
 
+    /// `bootout` and not a signal: the agent has `KeepAlive`, and launchd would
+    /// start the old binary again the moment it exited.
+    pub async fn stop() -> Result<()> {
+        let uid = current_uid().await?;
+        let plist = plist_path()?;
+        run_quiet(
+            "launchctl",
+            &["bootout", &format!("gui/{uid}"), &plist.to_string_lossy()],
+        )
+        .await?;
+        Ok(())
+    }
+
     pub async fn restart() -> Result<()> {
         let uid = current_uid().await?;
         let target = format!("gui/{uid}/{UNIT}");
@@ -1258,6 +1255,13 @@ mod platform {
                 set_run_entry(&exe).with_context(|| {
                     format!("the Task Scheduler refused the task ({err:#}) and the user Run entry")
                 })?;
+                // A task from an earlier install still names the `hoardd` it was
+                // created for. Left in place it starts that one at logon, and
+                // `start` fires it instead of the new one: after the move out of
+                // the NSIS folder it pointed at a file that no longer existed.
+                if task_installed().await {
+                    let _ = run_quiet("schtasks", &["/Delete", "/TN", UNIT, "/F"]).await;
+                }
                 record_exec(&exe);
                 Ok(Some(RUN_KEY_MANAGER))
             }
@@ -1313,6 +1317,11 @@ mod platform {
         Ok(())
     }
 
+    pub async fn stop() -> Result<()> {
+        let _ = run_quiet("schtasks", &["/End", "/TN", UNIT]).await;
+        Ok(())
+    }
+
     pub async fn restart() -> Result<()> {
         let _ = run_quiet("schtasks", &["/End", "/TN", UNIT]).await;
         start().await
@@ -1361,6 +1370,9 @@ mod platform {
     }
     pub async fn start() -> Result<()> {
         anyhow::bail!("no service backend for this OS")
+    }
+    pub async fn stop() -> Result<()> {
+        Ok(())
     }
     pub async fn restart() -> Result<()> {
         anyhow::bail!("no service backend for this OS")
@@ -1454,17 +1466,9 @@ fn to_utf16le_with_bom(s: &str) -> Vec<u8> {
 mod tests {
     use super::*;
 
-    #[test]
-    fn only_a_fresh_uninstall_marker_brings_login_start_back() {
-        assert!(within_reclaim_window(Some(Duration::from_secs(90))));
-        assert!(!within_reclaim_window(Some(Duration::from_secs(3 * 3600))));
-        // A marker we can't date (no mtime, or one from the future) is not acted on.
-        assert!(!within_reclaim_window(None));
-    }
-
-    /// La unidad tiene que ejecutar **el daemon**, no un cliente: desde el 4b/4c
-    /// `hoard sync run` es un espectador, y supervisar a un espectador significa
-    /// que `systemctl --user stop` no para el sync.
+    /// The unit has to run the daemon, not a client: `hoard sync run` only
+    /// watches, and supervising a watcher means `systemctl --user stop` doesn't
+    /// stop the sync.
     #[cfg(target_os = "linux")]
     #[test]
     fn the_unit_execs_the_daemon_itself() {
@@ -1609,6 +1613,13 @@ mod tests {
     fn the_unit_declares_this_installations_daemon() {
         let own = crate::client::own_daemon_binary();
         let got = service_binary();
+        // An installed core outranks the sibling, unless somebody pinned one.
+        if crate::client::chosen_daemon_binary().is_none() {
+            if let Some(core) = crate::client::layout_daemon() {
+                assert_eq!(got, core);
+                return;
+            }
+        }
         if own.parent().is_some_and(|p| !p.as_os_str().is_empty()) {
             // A real path (the sibling, `HOARDD_BIN`) is declared exactly as is.
             assert_eq!(got, own);

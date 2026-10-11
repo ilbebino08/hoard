@@ -8,6 +8,41 @@ Entries are reviewed line by line by the [maintainer](https://github.com/rleeon)
 
 ## [Unreleased]
 
+### Changed
+- **One installer, one Hoard per machine.** Hoard Setup is now the way Hoard
+  gets onto a machine, updated and taken off, and the scripts and `hoard
+  install` run the very same steps. The engine and the terminal live in one
+  place only (`~/.local/bin`, `%LOCALAPPDATA%\hoard\bin`), and the app is a
+  file Hoard Setup puts beside them: an AppImage on Linux, a plain `.exe` on
+  Windows, the `.app` on macOS. Updates no longer ask for a password, so they
+  apply on their own everywhere; the one prompt left is taking an old `.deb`
+  or `.rpm` off, once. The `.deb`, `.rpm`, NSIS and MSI packages are gone from
+  the download page.
+- **Installing or updating takes over from any older Hoard.** Up to 1.2.1 the
+  app packages carried a second copy of the engine, and a machine that went
+  through two installers could end up with the app on one version and the
+  sync engine on another, for good. Now every install stops whatever Hoard is
+  running, takes off what older releases left (the package, the old Windows
+  folder, stray copies of the engine), starts the service from the new engine
+  and checks that the engine answering is the version just installed. A
+  package that needs a password is taken off the next time somebody opens the
+  app, through Hoard Setup.
+- **Uninstalling from Windows Settings removes everything.** The entry in
+  "Installed apps" runs Hoard Setup now, which removes the app, the engine, the
+  login task and the shortcuts. The old uninstaller only knew its own folder,
+  and the sync kept running after it.
+
+### Fixed
+- **Hoard Setup no longer asks for an administrator on Windows.** Windows
+  takes any program described as "Setup" for an installer and demanded
+  elevation before running it, although everything it installs goes into the
+  user's own folder. It now says so in its manifest and opens like any other
+  program.
+- **The install scripts no longer fail behind a shared address.** They read
+  the latest version without GitHub's API, which allows 60 requests an hour
+  per address, and they refuse a download whose checksum is missing instead
+  of installing it unchecked.
+
 ## [1.2.1] - 2026-10-03
 
    Hoard now can send you emails, a new detection upgrade, removed hoard-screen,

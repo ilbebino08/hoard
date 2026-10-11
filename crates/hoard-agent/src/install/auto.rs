@@ -19,10 +19,11 @@
 //!
 //! 1. Can it be applied without bothering anybody? Neither the user nor a
 //!    preference decides that: the route the app arrived by does
-//!    ([`super::Delivery`]). An AppImage and a per-user NSIS write into the home
-//!    and nobody notices; a `.deb` needs a polkit dialog and a `.dmg` needs a hand
-//!    dragging it. The first family really does update itself; the second can only
-//!    do it with somebody present.
+//!    ([`super::Delivery`]). The AppImage, the Windows app and the `.app` all live
+//!    in the user's own folders and nobody notices them change; the old `.deb`
+//!    and `.rpm` needed a polkit dialog, and a machine that still has one is
+//!    repaired rather than updated. What can still need somebody is a core put
+//!    where this user can't write.
 //! 2. Has the deadline passed? A clock starts the moment a new version is seen
 //!    ([`GRACE`], 48 hours). Before it rings, an update that needs somebody is
 //!    offered and can be postponed. Afterwards, it is not.
@@ -89,8 +90,8 @@ pub enum Stance {
     /// Downloaded, verified, and this machine can relieve itself without asking
     /// anybody. Applied without a word.
     ApplyQuietly { version: String },
-    /// Downloaded, but applying it needs somebody present (polkit, a `.dmg`). It
-    /// gets offered, and can be postponed.
+    /// Downloaded, but applying it needs somebody present (a core outside the
+    /// user's reach). It gets offered, and can be postponed.
     Ask { version: String },
     /// The deadline has passed. It gets applied, and if it needs somebody present
     /// the window does not let them carry on until it is.
@@ -249,6 +250,10 @@ pub struct Ledger {
     pub last_error: Option<String>,
     #[serde(default)]
     pub failures: u32,
+    /// When the service last started a repair on its own. One a day at most: a
+    /// repair that can't finish would otherwise run at every start.
+    #[serde(default, with = "time::serde::rfc3339::option")]
+    pub repair_tried_at: Option<OffsetDateTime>,
 }
 
 impl Ledger {
@@ -331,12 +336,12 @@ impl Ledger {
 impl Delivery {
     /// Can this route be relieved without dialogs and without hands?
     ///
-    /// It is not the negation of [`Delivery::needs_elevation`]: a `.dmg` asks for no
-    /// privileges and still needs a person dragging it into the Finder. The
-    /// question that matters here is "can this happen while nobody is looking?",
-    /// and only two routes answer yes.
+    /// Every current route can: the AppImage and the Windows executable live in
+    /// the user's own directories, and the `.app` is copied out of its disk image
+    /// without the Finder. The old packages needed polkit or a hand, which is
+    /// why they are being retired rather than kept.
     pub fn applies_unattended(self) -> bool {
-        matches!(self, Delivery::AppImage | Delivery::Nsis)
+        matches!(self, Delivery::AppImage | Delivery::Exe | Delivery::Dmg)
     }
 }
 
@@ -346,9 +351,7 @@ impl Manifest {
     ///
     /// Entirely: [`super`]'s rule is that the pieces go to the same version or none
     /// of them moves, so one piece needing a dialog is enough for the whole update
-    /// to need one. Applying the core silently and leaving the app waiting on a
-    /// `pkexec` the user cancels is precisely the silent mismatch this module exists
-    /// not to create.
+    /// to need one.
     pub fn applies_unattended(&self) -> bool {
         if let Some(d) = self.delivery {
             if !d.is_ours() {
@@ -358,13 +361,7 @@ impl Manifest {
         if self.has(Component::Desktop) && !self.delivery.is_some_and(|d| d.applies_unattended()) {
             return false;
         }
-        // A core inside the bundle does not relieve itself: the app's installer
-        // brings it, so it inherits that answer (which is already `true` if we got
-        // this far with Desktop installed).
-        if self.core_from_bundle {
-            return self.has(Component::Desktop);
-        }
-        self.core_dir.as_deref().is_some_and(dir_is_writable)
+        super::layout::core_dir().is_ok_and(|d| dir_is_writable(&d))
     }
 }
 
@@ -559,54 +556,39 @@ mod tests {
             delivery: Some(Delivery::Managed),
             core_dir: None,
             desktop_path: None,
-            core_from_bundle: false,
         };
         assert!(!m.applies_unattended());
     }
 
     #[test]
-    fn a_native_package_needs_someone_there() {
-        for d in [Delivery::Deb, Delivery::Rpm, Delivery::Dmg] {
+    fn an_old_package_needs_someone_there() {
+        for d in [Delivery::Deb, Delivery::Rpm, Delivery::Nsis, Delivery::Msi] {
             let m = Manifest {
                 version: "1.0.0".into(),
                 components: vec![Component::Core, Component::Desktop],
                 delivery: Some(d),
                 core_dir: None,
                 desktop_path: None,
-                core_from_bundle: true,
             };
             assert!(!m.applies_unattended(), "{d:?} should need a human");
         }
     }
 
+    /// Every route a fresh install picks applies itself; that is the point of
+    /// having retired the others.
     #[test]
-    fn appimage_and_nsis_apply_themselves() {
-        for d in [Delivery::AppImage, Delivery::Nsis] {
+    fn every_current_route_applies_itself() {
+        for d in [Delivery::AppImage, Delivery::Exe, Delivery::Dmg] {
             assert!(d.applies_unattended(), "{d:?} should be silent");
         }
         for d in [
             Delivery::Deb,
             Delivery::Rpm,
-            Delivery::Dmg,
+            Delivery::Nsis,
+            Delivery::Msi,
             Delivery::Managed,
         ] {
             assert!(!d.applies_unattended(), "{d:?} should not be silent");
         }
-    }
-
-    #[test]
-    fn a_headless_core_in_a_user_dir_applies_itself() {
-        let tmp = std::env::temp_dir().join("hoard-auto-test-core");
-        std::fs::create_dir_all(&tmp).unwrap();
-        let m = Manifest {
-            version: "1.0.0".into(),
-            components: vec![Component::Core],
-            delivery: None,
-            core_dir: Some(tmp.clone()),
-            desktop_path: None,
-            core_from_bundle: false,
-        };
-        assert!(m.applies_unattended());
-        let _ = std::fs::remove_dir_all(&tmp);
     }
 }

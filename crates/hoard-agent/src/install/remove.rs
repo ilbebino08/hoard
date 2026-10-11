@@ -90,37 +90,21 @@ pub async fn desktop(
             Ok(Some(path.to_path_buf()))
         }
         Delivery::Nsis => {
-            // The installer leaves its own uninstaller beside the app, and that
-            // is the only thing that knows what it wrote: shortcuts, the
-            // registry entry, the PATH. Deleting the folder ourselves would
-            // leave every one of those behind.
             let dir = path.parent().context("the app has no parent directory")?;
-            let uninstaller = dir.join("uninstall.exe");
-            if !uninstaller.is_file() {
-                bail!(
-                    "no uninstaller at {}; remove Hoard from Settings › Apps instead",
-                    uninstaller.display()
-                );
+            nsis(dir).await?;
+            Ok(Some(path.to_path_buf()))
+        }
+        Delivery::Msi => {
+            bail!("the MSI install is removed by its product code, from the list of leftovers")
+        }
+        Delivery::Exe => {
+            #[cfg(windows)]
+            super::windows::unregister().await;
+            std::fs::remove_file(path).with_context(|| format!("deleting {}", path.display()))?;
+            let _ = std::fs::remove_file(path.with_extension("old"));
+            if let Some(dir) = path.parent() {
+                let _ = std::fs::remove_dir(dir);
             }
-            // `_?=` is what makes this synchronous. Without it an NSIS
-            // uninstaller copies itself to the temp directory, launches that
-            // copy detached and returns success immediately, so the caller
-            // reports "removed" while the files are still there, and whatever
-            // it does next races the deletion. With `_?=` it runs in place and
-            // blocks; the price is that it can no longer delete its own
-            // executable, which is why we do it here.
-            let status = tokio::process::Command::new(&uninstaller)
-                .arg("/S")
-                .arg(format!("_?={}", dir.display()))
-                .status()
-                .await
-                .with_context(|| format!("running {}", uninstaller.display()))?;
-            if !status.success() {
-                bail!("the uninstaller exited with {status}");
-            }
-            let _ = std::fs::remove_file(&uninstaller);
-            // Only if it emptied: anything the user dropped in there is theirs.
-            let _ = std::fs::remove_dir(dir);
             Ok(Some(path.to_path_buf()))
         }
         Delivery::Dmg => {
@@ -137,6 +121,83 @@ pub async fn desktop(
             )
         }
     }
+}
+
+/// Runs the NSIS installer's own uninstaller, silently and in place.
+///
+/// It is the only thing that knows what it wrote: shortcuts, the registry
+/// entry, the PATH. Deleting the folder ourselves would leave every one of
+/// those behind.
+pub async fn nsis(dir: &Path) -> Result<()> {
+    let uninstaller = dir.join("uninstall.exe");
+    if !uninstaller.is_file() {
+        bail!(
+            "no uninstaller at {}; remove Hoard from Settings › Apps instead",
+            uninstaller.display()
+        );
+    }
+    // `_?=` is what makes this synchronous. Without it an NSIS uninstaller
+    // copies itself to the temp directory, launches that copy detached and
+    // returns success immediately, so the caller reports "removed" while the
+    // files are still there, and whatever it does next races the deletion.
+    // With `_?=` it runs in place and blocks; the price is that it can no
+    // longer delete its own executable, which is why we do it here.
+    //
+    // It has to arrive bare, spaces and all: NSIS only sees `_?=` after a space
+    // and takes the rest of the line as the path. `arg` quotes anything with a
+    // space in it, and under `C:\Users\Juan Pérez` that quote alone turned this
+    // back into the detached run described above.
+    let mut command = tokio::process::Command::new(&uninstaller);
+    command.arg("/S");
+    let in_place = format!("_?={}", dir.display());
+    #[cfg(windows)]
+    command.raw_arg(in_place);
+    #[cfg(not(windows))]
+    command.arg(in_place);
+    let status = command
+        .status()
+        .await
+        .with_context(|| format!("running {}", uninstaller.display()))?;
+    if !status.success() {
+        bail!("the uninstaller exited with {status}");
+    }
+    let _ = std::fs::remove_file(&uninstaller);
+    // Only if it emptied: anything the user dropped in there is theirs.
+    let _ = std::fs::remove_dir(dir);
+    Ok(())
+}
+
+/// Removes a per-machine MSI install. It needs an administrator, so only with
+/// somebody there to answer the UAC prompt.
+pub async fn msi(product_code: &str, interactive: bool) -> Result<()> {
+    if !interactive {
+        bail!("removing the MSI install needs an administrator; run Hoard Setup to finish");
+    }
+    let status = tokio::process::Command::new("msiexec")
+        .args(["/x", product_code, "/passive", "/norestart"])
+        .status()
+        .await
+        .context("running msiexec")?;
+    // 1605: "this product is not installed", already gone.
+    if !status.success() && status.code() != Some(1605) {
+        bail!("msiexec exited with {status}");
+    }
+    Ok(())
+}
+
+/// Which native package manager owns `path`: a `.deb` or an `.rpm` we shipped.
+/// `None` when neither does, which means somebody else's package.
+pub async fn package_manager_of(path: &Path) -> Option<Delivery> {
+    if owning_package("dpkg", &["-S"], path).await.is_some() {
+        return Some(Delivery::Deb);
+    }
+    if owning_package("rpm", &["-qf", "--queryformat", "%{NAME}"], path)
+        .await
+        .is_some()
+    {
+        return Some(Delivery::Rpm);
+    }
+    None
 }
 
 /// Which package owns `path`, according to the package manager.
@@ -181,10 +242,64 @@ fn remove_desktop_entry() {
     let _ = std::fs::remove_file(fetch::menu_icon_path(&home));
 }
 
+/// The app's own start at login, which `tauri-plugin-autostart` names after the
+/// product: `Hoard` under `HKCU\...\Run`, `~/.config/autostart/Hoard.desktop`,
+/// `~/Library/LaunchAgents/Hoard.plist`. Not the service's, which is
+/// `hoardd::autostart`'s. Left behind, it named a deleted app at every login.
+///
+/// Only when it starts `hoard-desktop`: the name is generic enough to be
+/// somebody else's, and a Flatpak's entry belongs to the Flatpak.
+pub fn app_autostart() {
+    const NAME: &str = "Hoard";
+    let ours = |text: &str| text.contains("hoard-desktop") && !text.contains("flatpak");
+    #[cfg(windows)]
+    {
+        use winreg::enums::{HKEY_CURRENT_USER, KEY_READ, KEY_WRITE};
+        use winreg::RegKey;
+        let hkcu = RegKey::predef(HKEY_CURRENT_USER);
+        let run = r"Software\Microsoft\Windows\CurrentVersion\Run";
+        let Ok(key) = hkcu.open_subkey_with_flags(run, KEY_READ | KEY_WRITE) else {
+            return;
+        };
+        if key
+            .get_value::<String, _>(NAME)
+            .is_ok_and(|value| ours(&value))
+        {
+            let _ = key.delete_value(NAME);
+            let approved =
+                r"Software\Microsoft\Windows\CurrentVersion\Explorer\StartupApproved\Run";
+            if let Ok(key) = hkcu.open_subkey_with_flags(approved, KEY_WRITE) {
+                let _ = key.delete_value(NAME);
+            }
+        }
+    }
+    #[cfg(unix)]
+    {
+        let Some(home) = std::env::var_os("HOME").map(PathBuf::from) else {
+            return;
+        };
+        let entry = if cfg!(target_os = "macos") {
+            home.join("Library")
+                .join("LaunchAgents")
+                .join(format!("{NAME}.plist"))
+        } else {
+            home.join(".config")
+                .join("autostart")
+                .join(format!("{NAME}.desktop"))
+        };
+        if std::fs::read_to_string(&entry).is_ok_and(|text| ours(&text)) {
+            let _ = std::fs::remove_file(&entry);
+        }
+    }
+}
+
 /// Deletes `hoard` and `hoardd` from `dir`, and returns what actually went.
 ///
-/// Only those two names, never the directory: `~/.local/bin` belongs to the
-/// user and is full of things that are not ours.
+/// Only those two names and their own debris (the copy an update parked as
+/// `.old` on Windows, a staging `.new` an interrupted one left), never the
+/// directory itself on Unix: `~/.local/bin` belongs to the user and is full of
+/// things that are not ours. On Windows the folder is Hoard's, and it goes when
+/// it is empty.
 pub fn core(dir: &Path) -> Result<Vec<PathBuf>> {
     let mut gone = Vec::new();
     let mut failed: Vec<String> = Vec::new();
@@ -198,8 +313,15 @@ pub fn core(dir: &Path) -> Result<Vec<PathBuf>> {
             Err(e) => failed.push(format!("{}: {e}", path.display())),
         }
     }
+    for name in ["hoard", "hoardd"] {
+        let _ = std::fs::remove_file(dir.join(format!("{name}.old")));
+        let _ = std::fs::remove_file(dir.join(format!(".{name}.new")));
+    }
     if !failed.is_empty() {
         bail!("could not delete {}", failed.join(", "));
+    }
+    if cfg!(windows) {
+        let _ = std::fs::remove_dir(dir);
     }
     Ok(gone)
 }
@@ -212,7 +334,7 @@ pub fn core(dir: &Path) -> Result<Vec<PathBuf>> {
 pub fn shell_path_line(dir: &Path) {
     #[cfg(target_os = "windows")]
     {
-        // The counterpart of `super::platform_reach`, which put this directory
+        // The counterpart of `super::shell_path`, which put this directory
         // into the user's `Path`. Leaving it is litter that points at nothing,
         // and the next install would find it already present and skip writing
         // it, so the asymmetry is not even harmless.
@@ -230,10 +352,10 @@ pub fn shell_path_line(dir: &Path) {
             .filter(|p| !p.trim().is_empty())
             .filter(|p| !p.trim().eq_ignore_ascii_case(want.trim()))
             .collect();
-        if kept.len() != current.split(';').filter(|p| !p.trim().is_empty()).count() {
-            if env.set_value("Path", &kept.join(";")).is_ok() {
-                super::broadcast_environment_change();
-            }
+        if kept.len() != current.split(';').filter(|p| !p.trim().is_empty()).count()
+            && env.set_value("Path", &kept.join(";")).is_ok()
+        {
+            super::broadcast_environment_change();
         }
     }
     #[cfg(unix)]

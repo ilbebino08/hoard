@@ -14,8 +14,12 @@
 #![cfg_attr(windows, windows_subsystem = "windows")]
 
 mod steps;
+#[cfg(windows)]
+mod updater_parent;
 
 use std::sync::Arc;
+
+use hoardd::setup::Want;
 
 slint::include_modules!();
 
@@ -45,20 +49,39 @@ const FAILED: i32 = 4;
 const EXISTING: i32 = 5;
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
-    // First thing, while this is still single-threaded: `set_var` is not sound
-    // once the Tokio runtime and the event loop have threads of their own.
-    if let Ok(daemon) = steps::daemon_binary() {
-        std::env::set_var(hoardd::client::DAEMON_BIN_ENV, daemon);
-    }
-
     let args: Vec<String> = std::env::args().skip(1).collect();
     let flag = |name: &str| args.iter().any(|a| a.eq_ignore_ascii_case(name));
+    let value = |name: &str| {
+        args.iter()
+            .position(|a| a == name)
+            .and_then(|i| args.get(i + 1))
+            .cloned()
+    };
+    let version = value("--version");
+    // A folder of binaries to install instead of the release's: offline, or a
+    // build being tried before it ships.
+    let from = value("--from").map(std::path::PathBuf::from);
+
     // `/S` is what a Windows installer answers to, and this one should answer to
-    // it too: it is how an unattended deployment drives any of them, and how
-    // this one gets tested on a machine nobody is looking at.
+    // it too: it is how an unattended deployment drives any of them, and it is
+    // how every Hoard up to 1.2.1 runs its update, since this program is
+    // published under the old installer's name for exactly that.
     if flag("--silent") || flag("/S") || flag("--uninstall") {
-        return silent(flag("--uninstall"), !flag("--no-desktop"));
+        #[cfg(windows)]
+        if let Some(code) = updater_parent::step_aside(&args) {
+            std::process::exit(code);
+        }
+        let want = if flag("--no-desktop") {
+            Want::Headless
+        } else {
+            Want::Keep
+        };
+        return silent(flag("--uninstall"), want, version, from);
     }
+    // Opened by the app to finish moving an older install, or by "Installed
+    // apps" to remove this one.
+    let repair = flag("--repair");
+    let remove = flag("--remove");
 
     // Before the window exists, so the first frame is already in the right
     // language rather than flashing English and correcting itself.
@@ -87,17 +110,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
     });
 
-    // Ask the disk before showing anything: on a machine that already has
-    // Hoard, "Continue" leads somewhere different, and finding that out after
-    // the user has committed to installing would be finding it out too late.
-    let found = steps::detect();
-    if let Some(existing) = &found {
-        ui.set_installed(true);
-        ui.set_installed_version(existing.version.clone().unwrap_or_default().into());
-        ui.set_installed_has_desktop(existing.has_desktop());
-    }
-    let found = Arc::new(found);
-
     // Slint owns the main thread from `run()` on, so every await lives here.
     let rt = Arc::new(tokio::runtime::Runtime::new()?);
     // And the main thread has to be inside it too. On Linux Slint's event loop
@@ -105,6 +117,17 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // built in its Tokio mode here (ashpd, through hoardd, asks for it), so
     // outside a runtime the installer panicked before drawing its first frame.
     let _runtime = rt.enter();
+
+    // Ask the disk before showing anything: on a machine that already has
+    // Hoard, "Continue" leads somewhere different, and finding that out after
+    // the user has committed to installing would be finding it out too late.
+    let found = rt.block_on(steps::detect());
+    if let Some(existing) = &found {
+        ui.set_installed(true);
+        ui.set_installed_version(existing.version.clone().unwrap_or_default().into());
+        ui.set_installed_has_desktop(existing.has_desktop());
+    }
+    let found = Arc::new(found);
 
     // Replace the compiled-in label with the release that will actually be
     // installed, as soon as GitHub answers.
@@ -153,15 +176,20 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         let weak = ui.as_weak();
         let rt = rt.clone();
         let found = found.clone();
+        let version = version.clone();
+        let from = from.clone();
         move || {
             let Some(ui) = weak.upgrade() else {
                 return;
             };
             // On an update, what to install is what is already there, so the
             // toggle was never shown, so its default must not decide.
-            let want_desktop = match found.as_ref() {
-                Some(existing) if ui.get_installed() => existing.has_desktop(),
-                _ => ui.get_want_desktop(),
+            let want = if found.is_some() && ui.get_installed() {
+                Want::Keep
+            } else if ui.get_want_desktop() {
+                Want::Desktop
+            } else {
+                Want::Headless
             };
             ui.set_message(Default::default());
             ui.set_prompt_dismissed(false);
@@ -169,13 +197,26 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             ui.set_screen(DOING);
 
             let weak = weak.clone();
+            let version = version.clone();
+            let from = from.clone();
             rt.spawn(async move {
-                let result = steps::run(want_desktop).await;
+                let result = steps::run(want, version, from, true).await;
+                if let Ok(outcome) = &result {
+                    log_outcome(outcome);
+                }
                 let _ = weak.upgrade_in_event_loop(move |ui| match result {
                     Ok(outcome) => {
-                        if let Some(path) = outcome.launch {
+                        if let Some(app) = &outcome.app {
+                            let path = hoardd::setup::launchable(app);
                             ui.set_launch_path(path.to_string_lossy().to_string().into());
                             ui.set_can_launch(true);
+                            // A repair the app asked for closed the app; it comes
+                            // back on its own rather than waiting for a click.
+                            if repair && outcome.app_was_running {
+                                hoardd::setup::reopen_app(app);
+                                let _ = slint::quit_event_loop();
+                                return;
+                            }
                         }
                         ui.set_screen(DONE);
                     }
@@ -198,7 +239,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         let rt = rt.clone();
         let found = found.clone();
         move || {
-            let (Some(ui), Some(existing)) = (weak.upgrade(), found.as_ref().clone()) else {
+            let (Some(ui), Some(_)) = (weak.upgrade(), found.as_ref()) else {
                 return;
             };
             ui.set_message(Default::default());
@@ -207,7 +248,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
             let weak = weak.clone();
             rt.spawn(async move {
-                let result = steps::uninstall(&existing).await;
+                let result = steps::uninstall(true).await;
                 let _ = weak.upgrade_in_event_loop(move |ui| match result {
                     Ok(kept) => {
                         ui.set_can_launch(false);
@@ -254,9 +295,28 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
     });
 
+    if remove && ui.get_installed() {
+        ui.set_screen(EXISTING);
+    } else if repair {
+        ui.invoke_start_install();
+    }
+
     present(ui.as_weak());
     ui.run()?;
     Ok(())
+}
+
+/// What the install left undone, beside the temp directory, for whoever has to
+/// ask why. The window shows the outcome; this keeps the details.
+fn log_outcome(outcome: &hoardd::setup::Outcome) {
+    let mut text = format!("installed {}\n", outcome.version);
+    for item in &outcome.left {
+        text.push_str(&format!("left: {item}\n"));
+    }
+    for warning in &outcome.warnings {
+        text.push_str(&format!("warning: {warning}\n"));
+    }
+    let _ = std::fs::write(std::env::temp_dir().join("hoard-setup.log"), text);
 }
 
 /// The password prompt closed unanswered, somewhere under whatever context the
@@ -323,14 +383,18 @@ fn present(weak: slint::Weak<Installer>) {
 /// A GUI binary on Windows has no console to print to, so the outcome goes to a
 /// file and to the exit code. That is also what makes it usable from a script,
 /// which is the reason installers have had a silent switch since forever.
-fn silent(uninstall: bool, want_desktop: bool) -> Result<(), Box<dyn std::error::Error>> {
+fn silent(
+    uninstall: bool,
+    want: Want,
+    version: Option<String>,
+    from: Option<std::path::PathBuf>,
+) -> Result<(), Box<dyn std::error::Error>> {
     let log = std::env::temp_dir().join("hoard-setup.log");
     let rt = tokio::runtime::Runtime::new()?;
 
     let outcome: Result<String, String> = rt.block_on(async {
         if uninstall {
-            let found = steps::detect().ok_or("nothing to uninstall: no Hoard on this machine")?;
-            let kept = steps::uninstall(&found)
+            let kept = steps::uninstall(false)
                 .await
                 .map_err(|e| format!("{e:#}"))?;
             Ok(format!(
@@ -341,13 +405,27 @@ fn silent(uninstall: bool, want_desktop: bool) -> Result<(), Box<dyn std::error:
                     .join(", ")
             ))
         } else {
-            let done = steps::run(want_desktop)
+            let done = steps::run(want, version, from, false)
                 .await
                 .map_err(|e| format!("{e:#}"))?;
-            Ok(match done.launch {
-                Some(path) => format!("installed. app at {}", path.display()),
-                None => "installed. core only".to_string(),
-            })
+            let mut line = match &done.app {
+                Some(path) => format!("installed {}. app at {}", done.version, path.display()),
+                None => format!("installed {}. core only", done.version),
+            };
+            for item in &done.left {
+                line.push_str(&format!("\nleft: {item}"));
+            }
+            for warning in &done.warnings {
+                line.push_str(&format!("\nwarning: {warning}"));
+            }
+            // An update run by an older Hoard's updater closed the app it was
+            // replacing; it comes back the way it was.
+            if done.app_was_running {
+                if let Some(app) = &done.app {
+                    hoardd::setup::reopen_app(app);
+                }
+            }
+            Ok(line)
         }
     });
 

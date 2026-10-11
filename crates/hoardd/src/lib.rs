@@ -35,6 +35,8 @@
 //! - [`client`]: the client plus "spawn if absent" (what the desktop and the CLI
 //!   use).
 //! - [`updater`]: the automatic update: look, download, apply, get relieved.
+//! - [`setup`]: installing, repairing and removing Hoard, the one sequence Hoard
+//!   Setup, `hoard install` and the updater's repairs all run.
 //!
 //! The session (resolution, refresher and lending the token) lives in
 //! `hoard_agent::session`, one shared implementation for every client.
@@ -48,6 +50,7 @@ pub mod engine;
 pub mod journal;
 pub mod notify;
 pub mod server;
+pub mod setup;
 pub mod transport;
 pub mod updater;
 
@@ -141,9 +144,6 @@ pub async fn run(options: Options) -> Result<Outcome> {
     // Windows the installer kills the daemon that set the marker, so the guard's
     // `Drop` never runs and only a fresh service can say it's over.
     hoard_agent::install::Swap::forget();
-    // Spawned: it shells out to the Task Scheduler, and the engine has no reason
-    // to wait for that.
-    tokio::spawn(autostart::reclaim_after_reinstall());
 
     let log = Arc::new(EventLog::new());
     let engine = Engine::new();

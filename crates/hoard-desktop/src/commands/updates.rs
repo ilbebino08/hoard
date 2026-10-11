@@ -20,7 +20,7 @@
 use std::time::Duration;
 
 use serde::Serialize;
-use tauri::{AppHandle, Manager, State};
+use tauri::{AppHandle, State};
 
 use crate::commands::error::AppError;
 use crate::state::AppState;
@@ -51,19 +51,11 @@ pub struct UpdateReport {
     pub server: Option<ComponentUpdate>,
 }
 
-/// GitHub releases API. For `check_for_updates` we only need the tag; for
-/// `apply_desktop_update` we also need to pick the right downloadable asset.
+/// GitHub releases API. `check_for_updates` only needs the tag.
 #[derive(serde::Deserialize)]
 struct GhRelease {
     tag_name: String,
-    #[serde(default)]
-    assets: Vec<GhAsset>,
 }
-
-/// The release's files are described by `hoard_agent::install::fetch`: the same
-/// GitHub JSON the terminal reads, and having two structs for it is how two updaters
-/// that should do the same thing end up drifting apart.
-use hoard_agent::install::fetch::Asset as GhAsset;
 
 /// `/v1/health` shape (mirrors `crates/hoard-server/src/routes/health.rs`).
 #[derive(serde::Deserialize)]
@@ -74,20 +66,6 @@ struct HealthResp {
 const CLIENT_VERSION: &str = env!("CARGO_PKG_VERSION");
 const GH_RELEASES_URL: &str = "https://api.github.com/repos/rleeon/hoard/releases/latest";
 const PROBE_TIMEOUT: Duration = Duration::from_secs(8);
-
-/// The result of checking a freshly downloaded installer against the release key.
-///
-/// The key and the verification live in `hoard_agent::install::fetch`, once: two
-/// copies of a trust key are two places to rotate it, and one place to forget.
-enum SigCheck {
-    /// A `<asset>.minisig` was present and its signature matched the bytes.
-    Verified,
-    /// The release shipped no signature for this asset. We refuse to *auto*-run
-    /// (pkexec-as-root) an unverified binary, but still hand the user the
-    /// download so they can install it themselves. Transitional: every signed
-    /// release takes the `Verified` path.
-    Unsigned,
-}
 
 // ---- the automatic update: the window is a view, not the owner
 //
@@ -275,23 +253,6 @@ async fn fetch_gh_latest() -> Result<String, String> {
 /// A full release fetch, used by `apply_desktop_update` to discover the asset
 /// list at install time (we don't cache it because the user might leave the
 /// app open for days between detection and applying).
-async fn fetch_gh_release() -> Result<GhRelease, String> {
-    let client = reqwest::Client::builder()
-        .user_agent(concat!("hoard-desktop/", env!("CARGO_PKG_VERSION")))
-        .timeout(Duration::from_secs(20))
-        .build()
-        .map_err(|e| e.to_string())?;
-    let resp = client
-        .get(GH_RELEASES_URL)
-        .header("accept", "application/vnd.github+json")
-        .send()
-        .await
-        .map_err(|e| e.to_string())?
-        .error_for_status()
-        .map_err(|e| e.to_string())?;
-    resp.json::<GhRelease>().await.map_err(|e| e.to_string())
-}
-
 async fn fetch_server_health(server_url: &str) -> Result<String, String> {
     let client = reqwest::Client::builder()
         .user_agent(concat!("hoard-desktop/", env!("CARGO_PKG_VERSION")))
@@ -339,50 +300,40 @@ fn parse_version(s: &str) -> (u32, u32, u32) {
 }
 
 /// Outcome of `apply_desktop_update`. The UI uses `kind` to decide what to
-/// show: on `installer_launched` we close the app so the OS installer can
-/// replace it; on `downloaded` we tell the user where the file is.
+/// show: on `installer_launched` Hoard Setup is up and takes it from there; on
+/// `downloaded` we tell the user where the file is.
 #[derive(Debug, Clone, Serialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum ApplyOutcome {
-    /// We spawned the platform installer (pkexec dpkg / msiexec / `open` on
-    /// macOS). The UI should prompt the user to wait + restart.
+    /// Hoard Setup is running and takes it from here: it closes this window
+    /// when it replaces the app, and opens the new one at the end.
     InstallerLaunched { path: String, version: String },
-    /// We downloaded the asset but couldn't auto-launch the installer. The
-    /// UI surfaces the path so the user can run it manually.
+    /// Hoard Setup is downloaded but couldn't be started. The UI surfaces the
+    /// path so the user can run it.
     Downloaded { path: String, version: String },
     /// A newer release appeared between the moment the modal showed the user a
-    /// version and the moment they confirmed. We abort *without downloading*
-    /// the stale one and report the version that's actually latest now so the
-    /// UI can refresh and re-offer it. Never install an older build than what
-    /// GitHub currently calls "latest".
+    /// version and the moment they confirmed. Nothing is downloaded; the UI
+    /// re-offers the version that is actually latest now.
     Superseded { latest: String },
 }
 
-/// Tauri command. Downloads the right release asset for this OS and tries to
-/// launch the platform installer.
+/// Tauri command. The "yes" of the in-app update modal, for a machine with no
+/// service to do it (the normal road is `apply_staged_update`).
 ///
-/// This is the "yes" path of the in-app update modal. We deliberately keep
-/// the privilege-escalation choice on the OS: `pkexec` for Linux .deb,
-/// `msiexec` for Windows .msi, `open` for macOS .dmg. Each pops the system's
-/// usual auth prompt; we never ask the user for a password ourselves.
+/// It no longer runs a package manager of its own. It downloads Hoard Setup for
+/// the latest release, checked against the release key like every other file,
+/// and opens it: the same installer, and the same sequence, as a fresh install
+/// from the website.
 #[tauri::command]
 pub async fn apply_desktop_update(
-    app: AppHandle,
     expected_version: Option<String>,
 ) -> Result<ApplyOutcome, AppError> {
-    // Network/HTTP failures fetching the release feed: surface as "unknown",
-    // since this branch fires before we even know what version we're trying
-    // to install. The raw `reqwest` message goes into `detail`.
-    let release = fetch_gh_release().await.map_err(|e| {
-        AppError::new("updates.error.title", "updates.error.unknown").with_detail(e)
-    })?;
-    let version = release.tag_name.trim_start_matches('v').to_string();
-
-    // Re-check at confirm time: if a newer release landed since the modal was
-    // painted (the badge can be up to 30 min stale, or the user sat on the
-    // dialog), don't silently install the version they *saw*: bail and tell
-    // the UI to re-offer the now-latest one. `is_newer` is strict, so this
-    // only triggers on a genuinely newer tag, not on an equal re-check.
+    let version = hoard_agent::install::fetch::latest_version()
+        .await
+        .map_err(|e| {
+            AppError::new("updates.error.title", "updates.error.unknown")
+                .with_detail(format!("{e:#}"))
+        })?;
     if let Some(expected) = expected_version {
         if is_newer(&version, &expected) {
             tracing::info!(
@@ -393,168 +344,79 @@ pub async fn apply_desktop_update(
             return Ok(ApplyOutcome::Superseded { latest: version });
         }
     }
-
-    let asset = pick_asset(&release.assets)
-        .ok_or_else(|| {
-            let assets = release
-                .assets
-                .iter()
-                .map(|a| a.name.as_str())
-                .collect::<Vec<_>>()
-                .join(", ");
-            AppError::new("updates.error.title", "updates.error.no_installer")
-                .with_detail(format!("v{version} · Assets: {assets}"))
-        })?
-        .clone();
-
-    // Download into the OS download dir so the file is findable later if the
-    // installer asks the user to "Save As".
-    let download_dir = app
-        .path()
-        .download_dir()
-        .or_else(|_| app.path().temp_dir())
-        .map_err(|e| {
-            AppError::new("updates.error.title", "updates.error.download_failed")
-                .with_detail(format!("locating a writable directory: {e}"))
-        })?;
-    tokio::fs::create_dir_all(&download_dir)
-        .await
-        .map_err(|e| {
-            AppError::new("updates.error.title", "updates.error.download_failed")
-                .with_detail(e.to_string())
-        })?;
-    let dest = download_dir.join(&asset.name);
-
-    // Download into memory first so the signature is checked BEFORE the bytes
-    // ever hit disk or an installer.
-    let bytes = download_bytes(&asset.url).await.map_err(|e| {
-        AppError::new("updates.error.title", "updates.error.download_failed").with_detail(e)
-    })?;
-
-    // Gate the privileged auto-install behind a minisign check against the
-    // embedded release key, the same guarantee the server's `upgrade` gives.
-    // A *tampered* artifact (signature present but wrong) aborts here and is
-    // never written; an as-yet-unsigned release degrades to a manual download
-    // rather than being run as root.
-    let sig = verify_installer_signature(&release.assets, &asset.name, &bytes)
-        .await
-        .map_err(|detail| {
-            AppError::new("updates.error.title", "updates.error.signature_invalid")
-                .with_detail(detail)
-        })?;
-
-    tokio::fs::write(&dest, &bytes).await.map_err(|e| {
+    let setup = hoardd::setup::fetch_setup(&version).await.map_err(|e| {
         AppError::new("updates.error.title", "updates.error.download_failed")
-            .with_detail(format!("writing {}: {e}", dest.display()))
+            .with_detail(format!("{e:#}"))
     })?;
-
-    let path_str = dest.to_string_lossy().to_string();
-
-    // Unsigned release: we have the file on disk but won't pkexec-install it.
-    // Surface it as a manual download so the user can install it deliberately.
-    if matches!(sig, SigCheck::Unsigned) {
-        tracing::warn!(
-            asset = %asset.name,
-            "release asset has no .minisig; refusing to auto-run the installer as root, \
-             offering manual install instead"
-        );
-        return Ok(ApplyOutcome::Downloaded {
-            path: path_str,
-            version,
-        });
-    }
-
-    // Capture our own binary path *before* the installer runs. On Linux the
-    // .deb install makes dpkg unlink+recreate /usr/bin/hoard-desktop, after
-    // which `std::env::current_exe()` resolves to ".../hoard-desktop (deleted)"
-    // and spawning that path fails, so the relaunch silently no-ops. That is the
-    // "I have to close and reopen it for the version to change" bug. Snapshotting
-    // the path here (and sanitizing a stale " (deleted)" suffix just in case)
-    // gives us a stable path to the freshly-installed binary.
-    let exe_before = std::env::current_exe().ok().map(sanitize_exe_path);
-
-    // Try to launch the platform installer. If that fails, we still succeeded
-    // at *downloading* the update, so report Downloaded with the path so the
-    // user can do it themselves.
-    match launch_installer(&dest).await {
-        Ok(()) => {
-            // Quit the old process shortly after we return. Without this the
-            // user is stuck running 1.3.5 even though dpkg/msiexec already
-            // dropped 1.4.0 on disk: that's exactly what the 1.3.5 to 1.4.0
-            // upgrade looked like in the wild on Linux (the app just carried
-            // on regardless) and is what makes Windows refuse to overlay the .exe
-            // until the running copy goes away. The small delay lets the
-            // frontend paint the "installed, reopen" toast before we cut the
-            // process. On Linux we additionally relaunch the freshly-
-            // installed binary so the user doesn't have to dig around the
-            // app menu, since the .deb sits at the same /usr/bin path so
-            // `current_exe()` already points at the new binary, and
-            // `setsid` detaches it from our dying process group.
-            let app2 = app.clone();
-            tauri::async_runtime::spawn(async move {
-                tokio::time::sleep(Duration::from_millis(1500)).await;
-                relaunch_then_exit(&app2, exe_before);
-            });
-            Ok(ApplyOutcome::InstallerLaunched {
-                path: path_str,
-                version,
-            })
-        }
-        Err(e) => {
-            tracing::warn!(error = %e, "installer launch failed, falling back to manual");
-            Ok(ApplyOutcome::Downloaded {
-                path: path_str,
-                version,
-            })
+    let path = setup.to_string_lossy().to_string();
+    match hoardd::setup::launch_setup(&setup, &[]) {
+        Ok(()) => Ok(ApplyOutcome::InstallerLaunched { path, version }),
+        Err(err) => {
+            tracing::warn!(error = %format!("{err:#}"), "couldn't start Hoard Setup, offering it as a download");
+            Ok(ApplyOutcome::Downloaded { path, version })
         }
     }
 }
 
-/// Try to spawn the new binary detached from the current process, then exit.
-/// Failures are logged and swallowed: the worst case is the user has to
-/// reopen the app from their app menu, which is exactly the 1.4.0 status
-/// quo we're trying to improve.
-// `exe_before` is only consumed on the Linux branch (relaunching the binary after
-// the .deb); on Windows and macOS the parameter is never read and would be an
-// unused variable.
-#[cfg_attr(not(target_os = "linux"), allow(unused_variables))]
+/// Starts the installed copy of the app detached from this process, then exits.
+/// Failures are logged and swallowed: the worst case is the user has to reopen
+/// the app from their menu.
+///
+/// The installed copy, not necessarily this executable: an AppImage runs from a
+/// mount of the *old* image (`$APPIMAGE` names the file, which the update
+/// replaced), and on Windows the running `.exe` was moved aside to make room
+/// for the new one.
 fn relaunch_then_exit(app: &AppHandle, exe_before: Option<std::path::PathBuf>) {
-    #[cfg(target_os = "linux")]
-    {
-        // Prefer the path we snapshotted before the install. Fall back to a
-        // freshly-sanitized `current_exe()` if we somehow didn't capture one.
-        let exe = exe_before.or_else(|| std::env::current_exe().ok().map(sanitize_exe_path));
-        if let Some(exe) = exe {
-            use std::process::{Command, Stdio};
-            // `setsid` puts the child in its own session so it survives our
-            // imminent `app.exit(0)`. If `setsid` isn't on PATH (unusual on
-            // any modern Linux) we just skip the relaunch; exit is still
-            // useful on its own because the old process was blocking the
-            // user from running the new binary anyway.
-            let spawn = Command::new("setsid")
-                .arg(&exe)
-                .stdin(Stdio::null())
-                .stdout(Stdio::null())
-                .stderr(Stdio::null())
-                .spawn();
-            if let Err(e) = spawn {
-                tracing::warn!(error = %e, exe = %exe.display(), "couldn't relaunch with setsid; user will have to reopen manually");
-            }
+    let target = installed_app().or(exe_before);
+    if let Some(target) = target {
+        if let Err(e) = spawn_detached(&target) {
+            tracing::warn!(error = %e, exe = %target.display(), "couldn't relaunch; the user will have to reopen it");
         }
     }
-    // On Windows we *don't* relaunch: msiexec is still running asynchronously
-    // and the .exe is mid-replace. Starting a process from the path that's
-    // being overwritten races msiexec and usually crashes. The user reopens
-    // from the Start menu after the installer finishes.
-    //
-    // On macOS we leave it to the user too: `open` on the .dmg pops Finder
-    // and the user drags into Applications.
     app.exit(0);
 }
 
+fn installed_app() -> Option<std::path::PathBuf> {
+    if let Some(image) = std::env::var_os("APPIMAGE") {
+        return Some(image.into());
+    }
+    hoard_agent::install::Manifest::load()
+        .ok()
+        .flatten()
+        .and_then(|m| m.desktop_path)
+        .filter(|p| p.exists())
+}
+
+fn spawn_detached(target: &std::path::Path) -> std::io::Result<()> {
+    use std::process::{Command, Stdio};
+    let mut command = if cfg!(target_os = "macos") && target.extension().is_some_and(|e| e == "app")
+    {
+        let mut c = Command::new("open");
+        c.arg("-n").arg(target);
+        c
+    } else if cfg!(target_os = "linux") {
+        // Its own session, so it survives our `app.exit(0)` a moment later.
+        let mut c = Command::new("setsid");
+        c.arg(target);
+        c
+    } else {
+        Command::new(target)
+    };
+    command
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null());
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        const DETACHED_PROCESS: u32 = 0x0000_0008;
+        command.creation_flags(DETACHED_PROCESS);
+    }
+    command.spawn().map(|_| ())
+}
+
 /// Strip a trailing " (deleted)" marker the Linux kernel appends to
-/// `/proc/self/exe` once the on-disk binary has been unlinked (e.g. by dpkg
-/// mid-upgrade). `current_exe()` reads that link, so without this we'd try to
+/// `/proc/self/exe` once the on-disk binary has been unlinked or replaced. `current_exe()` reads that link, so without this we'd try to
 /// spawn ".../hoard-desktop (deleted)" and fail.
 fn sanitize_exe_path(exe: std::path::PathBuf) -> std::path::PathBuf {
     if let Some(s) = exe.to_str() {
@@ -563,152 +425,6 @@ fn sanitize_exe_path(exe: std::path::PathBuf) -> std::path::PathBuf {
         }
     }
     exe
-}
-
-/// The release file this machine should get.
-///
-/// The choice is not made here. `hoard_agent::install` looks at the machine
-/// (available package manager, read-only root, whether it can elevate without
-/// hanging) and the route comes out of that; `fetch::asset_for` translates the route
-/// into a file. This used to decide on its own by looking only at the distro, which
-/// is why on an atomic image (SteamOS, Bazzite) it offered an `.rpm` there is no way
-/// to apply: `rpm` is on the `PATH`, but `/usr` is read-only. Those machines get the
-/// AppImage now, the same as from the terminal.
-fn pick_asset(assets: &[GhAsset]) -> Option<&GhAsset> {
-    let probe = hoard_agent::install::Probe::read();
-    let delivery = hoard_agent::install::resolve_delivery(&probe);
-    hoard_agent::install::fetch::asset_for(delivery, assets)
-}
-
-async fn download_bytes(url: &str) -> Result<Vec<u8>, String> {
-    let client = reqwest::Client::builder()
-        .user_agent(concat!("hoard-desktop/", env!("CARGO_PKG_VERSION")))
-        .timeout(Duration::from_secs(120))
-        .build()
-        .map_err(|e| e.to_string())?;
-    let bytes = client
-        .get(url)
-        .send()
-        .await
-        .map_err(|e| e.to_string())?
-        .error_for_status()
-        .map_err(|e| e.to_string())?
-        .bytes()
-        .await
-        .map_err(|e| e.to_string())?;
-    Ok(bytes.to_vec())
-}
-
-/// Checks the freshly downloaded installer against the release key.
-///
-/// - `Ok(Verified)`: a signature is present and valid, so it can be auto-installed.
-/// - `Ok(Unsigned)`: the release publishes no signature for this file, and the
-///   caller stays on a manual download rather than running anything as root.
-/// - `Err(detail)`: there was a signature and it does NOT match, or it could not be
-///   read. It aborts and the download is discarded: this is the tampered-artifact
-///   case.
-///
-/// The cryptography and the key are `install::fetch`'s, shared with the terminal.
-/// What stays here is the tolerance for the `Unsigned` case, which is this updater's
-/// decision and not the verification's.
-async fn verify_installer_signature(
-    assets: &[GhAsset],
-    asset_name: &str,
-    bytes: &[u8],
-) -> Result<SigCheck, String> {
-    let sig_name = format!("{asset_name}.minisig");
-    let Some(sig_asset) = assets.iter().find(|a| a.name == sig_name) else {
-        return Ok(SigCheck::Unsigned);
-    };
-
-    let client = reqwest::Client::builder()
-        .user_agent(concat!("hoard-desktop/", env!("CARGO_PKG_VERSION")))
-        .timeout(Duration::from_secs(30))
-        .build()
-        .map_err(|e| e.to_string())?;
-    let sig_text = client
-        .get(&sig_asset.url)
-        .send()
-        .await
-        .map_err(|e| format!("downloading signature: {e}"))?
-        .error_for_status()
-        .map_err(|e| format!("signature download status: {e}"))?
-        .text()
-        .await
-        .map_err(|e| format!("reading signature: {e}"))?;
-
-    hoard_agent::install::fetch::verify(bytes, &sig_text)
-        .map_err(|e| format!("{e:#}"))
-        .map(|()| SigCheck::Verified)
-}
-
-#[cfg(target_os = "linux")]
-async fn launch_installer(path: &std::path::Path) -> Result<(), String> {
-    // pkexec pops the polkit auth dialog and runs the package manager as root.
-    // If the user cancels, it never runs and we get a non-zero exit; we treat
-    // that as an error so the UI can fall back to "Downloaded".
-    let p = path.to_string_lossy().to_string();
-    let is_rpm = path
-        .extension()
-        .is_some_and(|e| e.eq_ignore_ascii_case("rpm"));
-
-    // For .rpm prefer dnf (resolves deps) and fall back to plain rpm -U; for
-    // .deb use dpkg -i (deps already vendored in the Tauri bundle).
-    let args: Vec<&str> = if is_rpm {
-        if std::env::split_paths(&std::env::var_os("PATH").unwrap_or_default())
-            .any(|d| d.join("dnf").is_file())
-        {
-            vec!["dnf", "install", "-y", &p]
-        } else {
-            vec!["rpm", "-U", "--force", &p]
-        }
-    } else {
-        vec!["dpkg", "-i", &p]
-    };
-
-    let status = tokio::process::Command::new("pkexec")
-        .args(&args)
-        .status()
-        .await
-        .map_err(|e| format!("spawning pkexec: {e}"))?;
-    if !status.success() {
-        return Err(format!("{} exited with status {status}", args.join(" ")));
-    }
-    Ok(())
-}
-
-#[cfg(target_os = "windows")]
-async fn launch_installer(path: &std::path::Path) -> Result<(), String> {
-    let p = path.to_string_lossy().to_string();
-    // Two bundle formats, two ways to start them. `pick_asset` prefers the
-    // NSIS `-setup.exe` (it's the one that stops `hoardd` before overwriting
-    // it), which runs directly; an `.msi` still has to go through `msiexec`,
-    // and handing one to the other just fails.
-    if p.to_ascii_lowercase().ends_with(".msi") {
-        tokio::process::Command::new("msiexec")
-            .args(["/i", &p])
-            .spawn()
-            .map_err(|e| format!("spawning msiexec: {e}"))?;
-    } else {
-        // `/UPDATE` because the app running this is installed. Without it the
-        // installer's reinstall page uninstalls the old copy first and puts
-        // back any shortcut the user had deleted.
-        tokio::process::Command::new(&p)
-            .arg("/UPDATE")
-            .spawn()
-            .map_err(|e| format!("spawning installer: {e}"))?;
-    }
-    Ok(())
-}
-
-#[cfg(target_os = "macos")]
-async fn launch_installer(path: &std::path::Path) -> Result<(), String> {
-    let p = path.to_string_lossy().to_string();
-    tokio::process::Command::new("open")
-        .arg(&p)
-        .spawn()
-        .map_err(|e| format!("spawning open: {e}"))?;
-    Ok(())
 }
 
 // ---- the server upgrade: in-app, for local servers only
@@ -975,86 +691,6 @@ pub async fn trigger_server_upgrade(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use hoard_agent::install::fetch::asset_for;
-    use hoard_agent::install::Delivery;
-
-    /// The architecture token Windows bundles carry on the machine running the
-    /// test. Hardcoding `x64` tied the two tests below to an x86 runner: on
-    /// aarch64 `pick_for_arch` recognises none of the candidates as its own and
-    /// returns `None`, which is correct behaviour failing the test for the wrong
-    /// reason. What is under test is the preference for NSIS over MSI, not the
-    /// machine that compiled it.
-    fn arch_token() -> &'static str {
-        match std::env::consts::ARCH {
-            "aarch64" => "arm64",
-            _ => "x64",
-        }
-    }
-
-    fn assets(names: &[&str]) -> Vec<GhAsset> {
-        names
-            .iter()
-            .map(|n| GhAsset {
-                name: (*n).to_string(),
-                url: format!("https://example.invalid/{n}"),
-            })
-            .collect()
-    }
-
-    /// The release publishes both and the `.msi` comes FIRST in the list, so the
-    /// order cannot come from the release: only the NSIS bundle carries the hook
-    /// that stops `hoardd` before overwriting its `.exe`. The preference lives in
-    /// `install::fetch` now, but the updater is what breaks when it changes, so the
-    /// assertion stays here.
-    #[test]
-    fn windows_update_takes_the_nsis_installer_not_the_msi() {
-        let arch = arch_token();
-        let msi = format!("Hoard_1.1.0_{arch}_en-US.msi");
-        let nsis = format!("Hoard_1.1.0_{arch}-setup.exe");
-        let rel = assets(&[
-            &msi,
-            &format!("{msi}.sha256"),
-            &nsis,
-            &format!("{nsis}.sha256"),
-        ]);
-        assert_eq!(
-            asset_for(Delivery::Nsis, &rel).map(|a| a.name.as_str()),
-            Some(nsis.as_str())
-        );
-    }
-
-    #[test]
-    fn windows_falls_back_to_the_msi_when_theres_no_nsis() {
-        let msi = format!("Hoard_1.1.0_{}_en-US.msi", arch_token());
-        let rel = assets(&[&msi]);
-        assert_eq!(
-            asset_for(Delivery::Nsis, &rel).map(|a| a.name.as_str()),
-            Some(msi.as_str())
-        );
-    }
-
-    /// Every route takes its own file and no other. This used to be resolved by a
-    /// list of suffixes with a cascading fallback (`.deb`, then `.rpm`, then the
-    /// AppImage), which is what left a machine with an immutable root holding a
-    /// package it could not apply. The machine decides the route before it gets
-    /// here, and there is no cascade here to contradict it.
-    #[test]
-    fn each_delivery_takes_its_own_file_and_no_other() {
-        let rel = assets(&["b.rpm", "a.deb", "c.AppImage"]);
-        assert_eq!(
-            asset_for(Delivery::Deb, &rel).map(|a| a.name.as_str()),
-            Some("a.deb")
-        );
-        assert_eq!(
-            asset_for(Delivery::Rpm, &rel).map(|a| a.name.as_str()),
-            Some("b.rpm")
-        );
-        assert_eq!(
-            asset_for(Delivery::AppImage, &rel).map(|a| a.name.as_str()),
-            Some("c.AppImage")
-        );
-        assert!(asset_for(Delivery::Dmg, &rel).is_none());
-    }
 
     #[test]
     fn newer_minor_beats_older() {

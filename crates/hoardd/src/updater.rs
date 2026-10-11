@@ -16,17 +16,11 @@
 //!
 //! ## What this loop never does
 //!
-//! **It opens no dialogs.** A background service that makes a polkit window appear
-//! at three in the morning is worse than not updating. In the background cycle
-//! everything runs `noninteractive`, so the routes that need a human (`.deb`,
-//! `.rpm`, `.dmg`) only move when somebody asks from a client
-//! ([`hoard_core::ipc::Request::ApplyUpdate`]), and then yes, with the dialog in
-//! front of whoever just asked for it.
-//!
-//! Past the deadline it is tried anyway, but only down the routes that do not ask
-//! (we are root already, or there is a `sudo` with a cached credential). Failing
-//! that, the update stays marked mandatory and the first window to open resolves
-//! it.
+//! **It opens no dialogs.** Every current route puts files in the user's own
+//! directories, so there is nothing to ask. What did need a password (a `.deb`
+//! or an `.rpm` from before the layout) is not updated here at all: the machine
+//! is repaired, by `hoard install` when nobody is there and by Hoard Setup when
+//! somebody opens the app (see [`crate::setup::Health`]).
 
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
@@ -51,6 +45,11 @@ const POLL: Duration = Duration::from_secs(60 * 60);
 /// game open, an upload halfway through). It probes the brake, not GitHub: the
 /// version is not asked about again until [`POLL`] comes round.
 const RETRY: Duration = Duration::from_secs(60);
+
+/// How soon a repair held back by a game or a transfer is looked at again. Only
+/// the disk and the engine are asked, never GitHub. Waiting for the hour, a
+/// Windows machine went on with the old copy 24 minutes after the game closed.
+const REPAIR_RETRY: Duration = Duration::from_secs(10 * 60);
 
 /// A breather before the first cycle. The service's start already competes with the
 /// engine's, the login's and the session's; a 90 MB download the moment you sign in
@@ -216,8 +215,11 @@ pub async fn watch(
             }
         }
 
+        let health = crate::setup::health().await;
+        let repair_held = repair(&health, &engine).await;
         let requested = updater.take_request();
-        next_poll = match tick(&updater, &engine, &notifier, requested, &relaunch).await {
+        next_poll = match tick(&updater, &engine, &notifier, &health, requested, &relaunch).await {
+            Cadence::Normal if repair_held => REPAIR_RETRY,
             Cadence::Normal => POLL,
             Cadence::Soon => RETRY,
         };
@@ -235,21 +237,32 @@ async fn tick(
     updater: &Updater,
     engine: &Engine,
     notifier: &crate::notify::Notifier,
+    health: &crate::setup::Health,
     requested: Option<Option<String>>,
     relaunch: &tokio::sync::mpsc::Sender<Relaunch>,
 ) -> Cadence {
-    let manifest = match Manifest::load_or_observe() {
-        Ok(m) => m,
-        Err(err) => {
-            updater.fail(format!("{err:#}"));
-            return Cadence::Normal;
-        }
+    // No record, and this isn't the core running: a Flatpak, or a build run out
+    // of a workspace. Nothing here is ours to update.
+    let Some(manifest) = health.manifest.clone() else {
+        updater.set_phase(Phase::Managed);
+        return Cadence::Normal;
     };
-
     // Nada nuestro que tocar: lo mantiene el gestor de paquetes de la distro, un
     // Flatpak, un `nix`. Se dice y no se vuelve a mirar.
     if manifest.delivery.is_some_and(|d| !d.is_ours()) {
         updater.set_phase(Phase::Managed);
+        return Cadence::Normal;
+    }
+
+    // An install from before the layout is moved, not updated: the update would
+    // relieve one copy and the service would go on running the other, which is
+    // how a 1.2.1 app ended up on a 1.2.0 engine for good. `repair` has already
+    // started that move, or is waiting to.
+    if !manifest.is_in_layout() || health.unit_elsewhere {
+        updater.fail(format!(
+            "this install needs a repair before it can update: {}",
+            health.describe()
+        ));
         return Cadence::Normal;
     }
 
@@ -366,8 +379,7 @@ async fn tick(
                 match hold {
                     Hold::GameRunning => {
                         tracing::info!(version = %version, "hoardd: a client asked to update with a game running, honouring it");
-                        return apply(updater, &mut ledger, &manifest, &version, false, relaunch)
-                            .await;
+                        return apply(updater, &mut ledger, &manifest, &version, relaunch).await;
                     }
                     Hold::TransferInFlight => {
                         updater.lock().requested = Some(asked);
@@ -385,7 +397,7 @@ async fn tick(
             // that need a dialog can open one.
             if let Some(asked) = requested {
                 if asked.as_deref().is_none_or(|v| v == version) {
-                    return apply(updater, &mut ledger, &manifest, &version, false, relaunch).await;
+                    return apply(updater, &mut ledger, &manifest, &version, relaunch).await;
                 }
             }
             if ledger
@@ -415,20 +427,7 @@ async fn tick(
             if burnt && requested.is_none() {
                 return Cadence::Normal;
             }
-            // `noninteractive` even here: the background cycle has no window to
-            // paint a dialog in, so a `pkexec` launched from here would wait for ever
-            // on somebody who will never see it. Only when a client asks explicitly is
-            // asking allowed.
-            let interactive = requested.is_some();
-            apply(
-                updater,
-                &mut ledger,
-                &manifest,
-                &version,
-                !interactive,
-                relaunch,
-            )
-            .await
+            apply(updater, &mut ledger, &manifest, &version, relaunch).await
         }
     }
 }
@@ -439,7 +438,6 @@ async fn apply(
     ledger: &mut Ledger,
     manifest: &Manifest,
     version: &str,
-    noninteractive: bool,
     relaunch: &tokio::sync::mpsc::Sender<Relaunch>,
 ) -> Cadence {
     let Some(staged) = stage::already_staged(version, manifest) else {
@@ -452,22 +450,19 @@ async fn apply(
     };
 
     updater.set_phase(Phase::Applying);
-    tracing::info!(version, noninteractive, "hoardd: applying the update");
+    tracing::info!(version, "hoardd: applying the update");
 
     // The attempt is written down *before* it happens, which is backwards
-    // everywhere except here: on Windows there is no after. The NSIS installer
-    // stops `hoardd.exe` before overwriting it, so the run that applies an
-    // update is killed while it waits for that installer and never reaches
-    // either arm below. Left uncounted, an install that keeps failing is
-    // retried every hour forever, and every retry force-closes the app the user
-    // is looking at. A cycle that sees what we staged is what we're now
-    // running clears this again.
+    // everywhere except here: a process that dies halfway (a crash, a machine
+    // switched off mid-swap) never reaches either arm below. Left uncounted, an
+    // install that keeps failing is retried every hour forever. A cycle that
+    // sees what we staged is what we're now running clears this again.
     ledger.failures += 1;
     ledger.last_error = Some(format!("applying {version} never reported back"));
     let _ = ledger.save();
 
     let mut manifest = manifest.clone();
-    match stage::apply(&staged, &mut manifest, noninteractive).await {
+    match stage::apply(&staged, &mut manifest).await {
         Ok(()) => {
             ledger.applied(version);
             let _ = ledger.save();
@@ -504,6 +499,42 @@ async fn apply(
             Cadence::Normal
         }
     }
+}
+
+/// Starts `hoard install` to move this machine into the layout, once a day at
+/// most. It stops this process on its way, so nothing here waits for it.
+///
+/// True when a repair is due but held back: it stops the service and closes the
+/// app, so it waits for the same things an update does, no game open and
+/// nothing halfway up or down.
+async fn repair(health: &crate::setup::Health, engine: &Engine) -> bool {
+    // Same as `tick`: with no record, or a delivery somebody else keeps, there
+    // is nothing here of ours to move.
+    let ours = health
+        .manifest
+        .as_ref()
+        .is_some_and(|m| m.delivery.is_none_or(|d| d.is_ours()));
+    if !ours || !health.needs_repair() || !health.fixable_unattended() {
+        return false;
+    }
+    let mut ledger = Ledger::load();
+    let now = OffsetDateTime::now_utc();
+    if ledger
+        .repair_tried_at
+        .is_some_and(|at| now - at < time::Duration::hours(24))
+    {
+        return false;
+    }
+    if engine.transfers_in_flight() || game_running(engine).await {
+        return true;
+    }
+    ledger.repair_tried_at = Some(now);
+    let _ = ledger.save();
+    match crate::setup::spawn_unattended_repair().await {
+        Ok(()) => tracing::info!(reason = %health.describe(), "hoardd: started a repair"),
+        Err(err) => tracing::warn!(error = %format!("{err:#}"), "hoardd: couldn't start a repair"),
+    }
+    false
 }
 
 /// Is any game open right now? The engine is asked, since it is what correlates

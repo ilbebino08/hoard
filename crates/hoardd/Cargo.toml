@@ -65,6 +65,9 @@ windows-sys = { version = "0.59", features = [
     "Win32_Foundation",
     "Win32_Security",
     "Win32_Security_Authorization",
+    # `ProcessIdToSessionId`: an install started through WMI lands in session 0,
+    # where reopening the app would only make an invisible window.
+    "Win32_System_RemoteDesktop",
     "Win32_System_Threading",
 ] }
 

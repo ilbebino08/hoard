@@ -169,27 +169,18 @@ fn in_path(name: &str) -> Option<PathBuf> {
     None
 }
 
-/// Whether the desktop app appears installed on this machine. On Unix, seeing
-/// `hoard-desktop` on `PATH` is enough (it's a normal binary). On Windows the
-/// Tauri app isn't on `PATH`, so also check its default NSIS install location
-/// and the Start Menu shortcut. Best-effort.
+/// Whether the desktop app appears installed on this machine: on `PATH`, where
+/// the installer puts it, or behind a Start Menu shortcut. Best-effort.
 fn desktop_installed() -> bool {
     if in_path("hoard-desktop").is_some() {
         return true;
     }
+    if hoard_agent::install::layout::app_path().is_ok_and(|p| p.exists()) {
+        return true;
+    }
     #[cfg(windows)]
     {
-        // Tauri's default NSIS install location.
-        if let Some(local) = std::env::var_os("LOCALAPPDATA") {
-            let cand = PathBuf::from(&local)
-                .join("Programs")
-                .join("Hoard")
-                .join("hoard-desktop.exe");
-            if cand.is_file() {
-                return true;
-            }
-        }
-        // Start Menu shortcut: Tauri's MSI and NSIS installers create one.
+        // Start Menu shortcut: every Windows installer we shipped makes one.
         if let Some(appdata) = std::env::var_os("APPDATA") {
             let start = PathBuf::from(&appdata)
                 .join("Microsoft")

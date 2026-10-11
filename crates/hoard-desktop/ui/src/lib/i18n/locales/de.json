@@ -617,7 +617,7 @@
   "updates.yes": "Ja",
   "updates.no": "Nein",
   "updates.installing": "Wird installiert…",
-  "updates.installer_launched": "Installer gestartet, folge der Systemaufforderung.",
+  "updates.installer_launched": "Hoard Setup ist geöffnet, schließe das Update dort ab.",
   "updates.superseded": "Vorgang abgebrochen: Eine neuere Version ({latest}) ist verfügbar. Aktualisiere erneut, um sie zu installieren.",
   "updates.downloaded_manual": "Heruntergeladen nach {path}. Öffnen, um zu installieren.",
   "updates.install_failed": "Update fehlgeschlagen: {error}",

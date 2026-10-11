@@ -31,8 +31,12 @@ enum Commands {
         #[arg(long)]
         with_desktop: bool,
         /// Pin a specific version instead of this binary's (e.g. `1.0.4`)
-        #[arg(long)]
+        #[arg(long, conflicts_with = "from")]
         version: Option<String>,
+        /// Install from a folder of Hoard binaries instead of downloading: the
+        /// core, and the app and Hoard Setup when they are there too
+        #[arg(long, value_name = "DIR")]
+        from: Option<std::path::PathBuf>,
     },
     /// Upgrade every installed component to the latest release, together
     Upgrade {
@@ -354,13 +358,14 @@ async fn dispatch(cli: Cli) -> Result<()> {
             headless,
             with_desktop,
             version,
+            from,
         } => {
             let want = match (headless, with_desktop) {
                 (true, _) => commands::install::Want::Headless,
                 (_, true) => commands::install::Want::Desktop,
-                _ => commands::install::Want::Detect,
+                _ => commands::install::Want::Keep,
             };
-            commands::install::run(want, version).await
+            commands::install::run(want, version, from).await
         }
         Commands::Upgrade { version } => commands::upgrade::run(version).await,
         Commands::Desktop { args } => commands::launch::run("hoard-desktop", &args),

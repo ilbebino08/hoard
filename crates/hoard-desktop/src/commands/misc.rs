@@ -191,6 +191,8 @@ pub enum InstallKind {
     System,
     Msi,
     Nsis,
+    /// The Windows app as Hoard Setup leaves it, in `%LOCALAPPDATA%\hoard\app`.
+    Setup,
     MacApp,
     /// Straight out of a cargo `target/` directory.
     Dev,
@@ -225,6 +227,9 @@ fn install_kind(exe: &std::path::Path) -> InstallKind {
         return InstallKind::Dev;
     }
     if cfg!(target_os = "windows") {
+        if hoard_agent::install::layout::app_path().is_ok_and(|app| app == exe) {
+            return InstallKind::Setup;
+        }
         // The NSIS installer leaves its uninstaller next to the binary; an MSI
         // is removed through Windows Installer and leaves nothing there.
         return if exe.with_file_name("uninstall.exe").is_file() {

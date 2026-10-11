@@ -198,23 +198,6 @@ async fn autostart(state: Option<&str>) -> Result<()> {
     }
 }
 
-/// Bounce the resident sync service after `hoard upgrade` has swapped the binary,
-/// so the daemon re-execs the new code. Best-effort and conservative:
-/// - only when the OS service is actually installed on this machine, since an
-///   upgrade must never install or start sync as a side effect;
-/// - a restart hiccup is a warning, not a failure: the upgrade already succeeded,
-///   so we never return `Err` here.
-pub async fn reload_after_upgrade() {
-    if !hoardd::autostart::installed().await {
-        return;
-    }
-    println!("reloading the sync service to run the new binary…");
-    if let Err(e) = restart().await {
-        eprintln!("warning: couldn't restart the sync service automatically: {e:#}");
-        eprintln!("  restart it yourself with `hoard sync restart`.");
-    }
-}
-
 /// What the *service* says about itself, which is different from what the service
 /// manager knows: the manager only knows the process it launched, and `hoardd` may
 /// have been brought up by a client. It does not start it; a status panel that

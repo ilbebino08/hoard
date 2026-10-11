@@ -114,6 +114,8 @@
         return ".msi";
       case "nsis":
         return "setup.exe";
+      case "setup":
+        return "Hoard Setup";
       case "mac_app":
         return "macOS";
       case "system":

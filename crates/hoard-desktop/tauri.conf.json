@@ -39,7 +39,7 @@
   },
   "bundle": {
     "active": true,
-    "targets": ["deb", "rpm", "appimage", "nsis", "msi", "app", "dmg"],
+    "targets": ["deb", "rpm", "appimage", "app", "dmg"],
     "externalBin": ["hoardd", "hoard"],
     "publisher": "Hoard",
     "homepage": "https://github.com/rleeon/hoard",
@@ -63,15 +63,6 @@
       },
       "appimage": {
         "bundleMediaFramework": false
-      }
-    },
-    "windows": {
-      "nsis": {
-        "installerIcon": "icons/icon.ico",
-        "installMode": "currentUser",
-        "languages": ["English"],
-        "displayLanguageSelector": false,
-        "installerHooks": "installer-hooks.nsh"
       }
     },
     "macOS": {

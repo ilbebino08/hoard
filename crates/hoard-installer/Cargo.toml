@@ -62,3 +62,13 @@ tokio = { workspace = true }
 [target.'cfg(unix)'.dependencies]
 # `setsid`, so the app we start outlives the installer that started it.
 libc = "0.2"
+
+# Who launched us, and waiting for it to exit: an older Hoard's updater runs
+# this program from inside `hoardd`, in the login task's job object, and the
+# install it starts ends that task (see `updater_parent`).
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.59", features = [
+    "Win32_Foundation",
+    "Win32_System_Diagnostics_ToolHelp",
+    "Win32_System_Threading",
+] }

@@ -2,7 +2,7 @@ name: Reship Hoard Setup
 
 # Rebuilds Hoard Setup, and nothing else, from the ref it is dispatched on and
 # swaps it into a release that already exists: the installer, its .minisig and
-# its .sha256. It is for an installer that shipped broken beside an app that is
+# its .sha256 (and on Windows its copy under the old installer's name). It is for an installer that shipped broken beside an app that is
 # fine, which is what happened to the Linux one in 1.2.0: it panicked on start
 # (zbus asked for a Tokio runtime the Slint thread was not in) while every other
 # file in the release worked. A new version for that would make every client
@@ -141,6 +141,9 @@ jobs:
 
       - name: Package Hoard Setup
         shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          RELEASE: ${{ inputs.release }}
         run: |
           set -e
           mkdir -p setup
@@ -150,6 +153,16 @@ jobs:
           case "${{ runner.os }}" in
             Windows)
               cp "$BIN.exe" "setup/HoardSetup-$ARCH.exe"
+              # The copy under the old installer's name, but only in a release
+              # that has the app as a plain `.exe`: up to 1.2.1 that name is the
+              # real NSIS installer, and overwriting it would hand the old
+              # updaters a move to files that release doesn't have.
+              V="${RELEASE#v}"
+              LEGACY=x64; [ "$ARCH" = aarch64 ] && LEGACY=arm64
+              if gh release view "$RELEASE" --repo "$GITHUB_REPOSITORY" --json assets \
+                   --jq '.assets[].name' | grep -qx "hoard-desktop-$V-windows-$ARCH.exe"; then
+                cp "$BIN.exe" "setup/Hoard_${V}_${LEGACY}-setup.exe"
+              fi
               ;;
             Linux)
               cp "$BIN" "setup/HoardSetup-$ARCH"
