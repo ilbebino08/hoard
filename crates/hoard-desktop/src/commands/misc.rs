@@ -57,6 +57,23 @@ pub async fn open_external(url: String) -> Result<(), String> {
                 }
             }
         }
+        // The AppImage also rewrites `XDG_DATA_DIRS`, which decides which
+        // `.desktop` file wins the `https` handler. Its GTK hook puts
+        // `/usr/share` ahead of the Flatpak export dirs, and SteamOS ships a stub
+        // `/usr/share/applications/firefox.desktop` that opens Discover to
+        // install Firefox: with the Flatpak Firefox already installed, every
+        // "Sign in" still landed in Discover. Hand the opener the session's order.
+        if let Some(appdir) = std::env::var_os("APPDIR") {
+            let dirs = std::env::var("XDG_DATA_DIRS").unwrap_or_default();
+            match host_data_dirs(&dirs, std::path::Path::new(&appdir)) {
+                Some(host) => {
+                    c.env("XDG_DATA_DIRS", host);
+                }
+                None => {
+                    c.env_remove("XDG_DATA_DIRS");
+                }
+            }
+        }
         c
     };
 
@@ -85,6 +102,67 @@ pub async fn open_external(url: String) -> Result<(), String> {
     cmd.spawn()
         .map(|_| ())
         .map_err(|e| format!("could not open browser: {e}"))
+}
+
+/// `XDG_DATA_DIRS` as the session had it before the AppImage launched us, or
+/// `None` when it had none.
+///
+/// Nothing saves the original, but what the AppImage does to it is
+/// reversible: `AppRun` prepends `$APPDIR/usr/share/` and the linuxdeploy GTK
+/// hook prepends `$APPDIR/usr/share:/usr/share:`. Dropping the `$APPDIR` entries
+/// and keeping each directory's last occurrence takes the injected `/usr/share`
+/// back out while the session's own copy, at the end, stays where it was.
+#[cfg(any(target_os = "linux", test))]
+fn host_data_dirs(dirs: &str, appdir: &std::path::Path) -> Option<String> {
+    let entries: Vec<&str> = dirs
+        .split(':')
+        .filter(|d| !d.is_empty() && !std::path::Path::new(d).starts_with(appdir))
+        .collect();
+    let mut host: Vec<&str> = Vec::new();
+    for (i, dir) in entries.iter().enumerate() {
+        if !entries[i + 1..].contains(dir) {
+            host.push(dir);
+        }
+    }
+    (!host.is_empty()).then(|| host.join(":"))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::host_data_dirs;
+    use std::path::Path;
+
+    const APPDIR: &str = "/tmp/.mount_HoardAbc123";
+
+    #[test]
+    fn restores_the_steamos_session_order() {
+        // What SteamOS's Plasma session has, with the Flatpak exports first.
+        let session = "/home/deck/.local/share/flatpak/exports/share:\
+                       /var/lib/flatpak/exports/share:/usr/local/share:/usr/share";
+        // `AppRun` on top of the GTK hook on top of the session.
+        let inside = format!("{APPDIR}/usr/share/:{APPDIR}/usr/share:/usr/share:{session}");
+        assert_eq!(
+            host_data_dirs(&inside, Path::new(APPDIR)).as_deref(),
+            Some(session)
+        );
+    }
+
+    #[test]
+    fn no_session_value_means_none() {
+        // The GTK hook over an unset variable leaves a trailing `:`.
+        let inside = format!("{APPDIR}/usr/share/:{APPDIR}/usr/share:");
+        assert_eq!(host_data_dirs(&inside, Path::new(APPDIR)), None);
+    }
+
+    #[test]
+    fn a_sibling_of_appdir_is_not_ours() {
+        let sibling = format!("{APPDIR}-other/usr/share");
+        let inside = format!("{APPDIR}/usr/share:{sibling}:/usr/share");
+        assert_eq!(
+            host_data_dirs(&inside, Path::new(APPDIR)),
+            Some(format!("{sibling}:/usr/share"))
+        );
+    }
 }
 
 /// One line from the interface into the app's log, for what only the webview can
