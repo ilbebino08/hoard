@@ -111,51 +111,38 @@
       return;
     }
 
-    // Does THIS redirect carry a fresh auth payload? Magic-link / OAuth returns
-    // land here either with `#access_token=…` (implicit) or `?code=…` (PKCE).
-    const href = window.location.href;
-    const hasFreshAuth = href.includes('access_token=') || /[?&]code=/.test(href);
+    void finish();
+  });
 
-    // No payload → an already-signed-in browser is just bouncing through to
-    // hand its session to the app. The cached session is the right one.
-    if (!hasFreshAuth) {
-      (async () => {
-        const { data, error: sessErr } = await supabase.auth.getSession();
-        if (data.session) done(data.session);
-        else {
-          error = $_('callback.failed_no_session');
-          errorDetail = sessErr?.message ?? null;
-          message = '';
-        }
-      })();
+  // One path for a fresh sign-in (tokens in this URL) and for a browser that was
+  // already signed in and is only handing its session over. `initialize()` settles
+  // once supabase-js has dealt with the URL: the new session is saved, or it says
+  // why it couldn't be. Only then is the session read.
+  //
+  // This used to wait for the SIGNED_IN event and give up after 8 s. When the
+  // client's start ran long, the page showed an error while the session still
+  // landed a moment later: the browser ended up signed in and the app never heard
+  // of it, and the second attempt (this path, already signed in) worked.
+  async function finish() {
+    const slow = setTimeout(() => (message = $_('callback.still_working')), 15000);
+    const { error: urlErr } = await supabase.auth.initialize();
+    clearTimeout(slow);
+    if (urlErr) {
+      // Never fall back to the stored session here: when the URL fails,
+      // supabase-js keeps the previous one, which may be another account.
+      error = $_('callback.failed_link');
+      errorDetail = urlErr.message;
+      message = '';
       return;
     }
-
-    // Fresh sign-in: the session MUST come from this URL, not the one still in
-    // localStorage. Clearing cookies doesn't clear that store, so reading the
-    // cached session here used to forward the *previous* account (and made
-    // switching accounts impossible). Wait for the SIGNED_IN that
-    // detectSessionInUrl fires once it has exchanged the new tokens.
-    let settled = false;
-    const { data: sub } = supabase.auth.onAuthStateChange((event, s) => {
-      if (settled) return;
-      if (event === 'SIGNED_IN' && s) {
-        settled = true;
-        sub.subscription.unsubscribe();
-        done(s);
-      }
-    });
-    setTimeout(() => {
-      if (settled) return;
-      settled = true;
-      sub.subscription.unsubscribe();
-      // The tokens were in the URL but `detectSessionInUrl` never fired
-      // SIGNED_IN. Naming the timeout separates it from "the provider said no"
-      // and from "there was nothing to sign in with".
-      error = $_('callback.failed_timeout');
+    const { data, error: sessErr } = await supabase.auth.getSession();
+    if (data.session) done(data.session);
+    else {
+      error = $_('callback.failed_no_session');
+      errorDetail = sessErr?.message ?? null;
       message = '';
-    }, 8000);
-  });
+    }
+  }
 </script>
 
 <section class="mx-auto flex max-w-md flex-col items-center px-4 py-32 text-center sm:px-6">

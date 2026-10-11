@@ -183,7 +183,7 @@ pub fn run() {
             // already running so its listener is up: emit, and also buffer it
             // so a not-yet-mounted webview still drains it on mount.
             if let Some(url) = first_hoard_url(argv.iter().cloned()) {
-                tracing::info!(url = %url, "deep link via single-instance argv");
+                tracing::info!(url = %loggable_url(&url), "deep link via single-instance argv");
                 capture_deep_link(app, url, true);
             }
         }))
@@ -532,7 +532,7 @@ pub fn run() {
             let dl_handle = app.handle().clone();
             app.deep_link().on_open_url(move |event| {
                 for url in event.urls() {
-                    tracing::info!(url = %url, "deep link opened (on_open_url)");
+                    tracing::info!(url = %loggable_url(url.as_str()), "deep link opened (on_open_url)");
                     commands::window::reveal_main(&dl_handle);
                     capture_deep_link(&dl_handle, url.to_string(), true);
                 }
@@ -546,7 +546,7 @@ pub fn run() {
             // mounts. Scan argv ourselves and buffer the URL; the frontend
             // drains it on mount. Don't emit: no listener exists yet.
             if let Some(url) = first_hoard_url(std::env::args()) {
-                tracing::info!(url = %url, "deep link via launch argv (cold start)");
+                tracing::info!(url = %loggable_url(&url), "deep link via launch argv (cold start)");
                 capture_deep_link(app.handle(), url, false);
             }
 
@@ -637,6 +637,13 @@ fn first_hoard_url<I: IntoIterator<Item = String>>(args: I) -> Option<String> {
     args.into_iter().find(|a| a.starts_with("hoard://"))
 }
 
+/// A deep link as it may be logged: scheme and path, never the query or the
+/// fragment. The sign-in callback carries the access and refresh tokens there,
+/// and the log file is shipped to the server (`logship`).
+fn loggable_url(url: &str) -> &str {
+    url.split(['?', '#']).next().unwrap_or_default()
+}
+
 /// Stash a `hoard://` URL where the frontend can find it and, optionally,
 /// emit the live `deep-link://new-url` event. We always buffer (so a webview
 /// whose listener isn't ready yet still drains it on mount) and emit only when
@@ -646,5 +653,19 @@ pub(crate) fn capture_deep_link(app: &tauri::AppHandle, url: String, emit: bool)
     *app.state::<AppState>().pending_deep_link.lock().unwrap() = Some(url.clone());
     if emit {
         let _ = app.emit("deep-link://new-url", url);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::loggable_url;
+
+    #[test]
+    fn a_logged_deep_link_keeps_no_tokens() {
+        let url = "hoard://auth/callback?access_token=eyJ.a.b&refresh_token=r1&state=n";
+        assert_eq!(loggable_url(url), "hoard://auth/callback");
+        let fragment = "hoard://auth/callback#access_token=x";
+        assert_eq!(loggable_url(fragment), "hoard://auth/callback");
+        assert_eq!(loggable_url("hoard://open"), "hoard://open");
     }
 }

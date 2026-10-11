@@ -592,10 +592,20 @@ pub async fn cloud_complete_login(
         }
     }
 
-    let me = fetch_me(&base, &access).await.map_err(prettify)?;
+    // Both failures are logged here because nothing else records them: the
+    // window turns them into a toast and the log said nothing at all, so a
+    // sign-in that failed in the app could not be told from one that never
+    // reached it.
+    let me = fetch_me(&base, &access).await.map_err(|e| {
+        tracing::warn!(error = %format!("{e:#}"), "cloud login: /v1/me failed, sign-in not completed");
+        prettify(e)
+    })?;
     save_creds(&app, &access, &refresh, &base, &me)
         .await
-        .map_err(|e| format!("Couldn't save session: {e}"))?;
+        .map_err(|e| {
+            tracing::warn!(error = %format!("{e:#}"), "cloud login: couldn't save the session");
+            format!("Couldn't save session: {e}")
+        })?;
     *state.cloud_account.lock().unwrap() = Some(me.clone());
     // The attempt completed: retire its nonce so the callback can't be
     // replayed into a new login later.

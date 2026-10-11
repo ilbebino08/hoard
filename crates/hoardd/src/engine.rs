@@ -121,6 +121,10 @@ struct Inner {
     /// disk changed), and why. The keeper serves it, being the only owner of the
     /// lifecycle.
     restart_requested: Option<String>,
+    /// A session became readable while the engine was down: start again now, from
+    /// the shortest backoff. Unlike `restart_requested` it never tears down an
+    /// engine, see [`Engine::wake_if_a_session_would_help`].
+    retry_now: bool,
     /// Backups and restores started and still without an outcome.
     ///
     /// The event pump keeps it, being where all of them pass, and the updater reads
@@ -370,6 +374,15 @@ impl Engine {
     /// session faults are unblocked by a session that reads, and the caller only
     /// calls after a read that worked. A keyring still refusing fails the lend
     /// first and never gets here.
+    ///
+    /// It cuts the keeper's backoff, it does **not** ask for a restart. `running`
+    /// stays false for the whole of a start, about four seconds, and right after a
+    /// login the desktop borrows a token five times in that window: as a restart,
+    /// each loan queued a teardown that hit the engine the moment it came up
+    /// (2026-10-11 16:18:36, "engine up" and a restart in the same millisecond,
+    /// with the first reconcile cut halfway). A start in flight reads the session
+    /// on its own; if it fails anyway, the permit left in `wake` sends the keeper
+    /// straight back to try again.
     pub fn wake_if_a_session_would_help(&self) {
         let reason = {
             let guard = self.lock();
@@ -388,12 +401,17 @@ impl Engine {
                 ?reason,
                 "hoardd: the session reads again, waking the engine instead of waiting out its backoff"
             );
-            self.request_restart("the session became readable");
+            self.lock().retry_now = true;
+            self.wake.notify_one();
         }
     }
 
     fn take_restart_request(&self) -> Option<String> {
         self.lock().restart_requested.take()
+    }
+
+    fn take_retry_now(&self) -> bool {
+        std::mem::take(&mut self.lock().retry_now)
     }
 
     /// A clean shutdown of the live engine so it can be started again. Keeper only.
@@ -484,6 +502,9 @@ pub async fn keeper(engine: Engine, events_tx: mpsc::Sender<AgentEvent>) -> Fini
         // pass.
         if let Some(reason) = engine.take_restart_request() {
             engine.stop_for_restart(&reason).await;
+            backoff = START_BACKOFF_MIN;
+        }
+        if engine.take_retry_now() {
             backoff = START_BACKOFF_MIN;
         }
         if engine.alive() {
@@ -952,6 +973,10 @@ mod tests {
         engine.lock().restart_requested.is_some()
     }
 
+    fn retry_asked(engine: &Engine) -> bool {
+        engine.lock().retry_now
+    }
+
     /// Lending the token proves the session reads. An engine down for not being able
     /// to read it has to retry now, not burn five minutes of backoff next to a session
     /// that already works: the 82 s of 2026-08-28.
@@ -964,11 +989,19 @@ mod tests {
         ] {
             let engine = down_with(reason, true);
             engine.wake_if_a_session_would_help();
-            assert!(
-                restart_asked(&engine),
-                "{reason:?} is unblocked by a session"
-            );
+            assert!(retry_asked(&engine), "{reason:?} is unblocked by a session");
         }
+    }
+
+    /// The double start after every login: a start in flight still reads as "down
+    /// with no session", and the token loans that follow a login landed in exactly
+    /// that window. A wake there must not leave a restart queued behind the engine
+    /// the start is bringing up.
+    #[test]
+    fn a_wake_during_a_start_doesnt_queue_a_restart() {
+        let engine = down_with(EngineDownReason::NoSession, true);
+        engine.wake_if_a_session_would_help();
+        assert!(!restart_asked(&engine));
     }
 
     /// And only those. An engine that went down for something else is not fixed by
@@ -980,7 +1013,7 @@ mod tests {
             let engine = down_with(reason, true);
             engine.wake_if_a_session_would_help();
             assert!(
-                !restart_asked(&engine),
+                !retry_asked(&engine),
                 "{reason:?} is not fixed by a session"
             );
         }
@@ -993,6 +1026,7 @@ mod tests {
         let engine = up_on(true);
         engine.wake_if_a_session_would_help();
         assert!(!restart_asked(&engine));
+        assert!(!retry_asked(&engine));
     }
 
     /// Las dos sesiones son independientes y el motor corre contra una sola:

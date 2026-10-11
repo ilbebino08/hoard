@@ -19,24 +19,62 @@ use tokio::net::{TcpListener, TcpStream};
 
 /// How long the listener waits for the browser to come back before giving up
 /// and freeing the port. Generous, since the user may have to pick an account or
-/// approve a provider consent screen first. It also bounds how long
-/// `cloud_login_url` keeps reusing the same in-flight attempt (nonce + port):
-/// past this window the listener is gone, so a fresh attempt is minted.
-pub(crate) const LISTEN_TIMEOUT: Duration = Duration::from_secs(300);
+/// approve a provider consent screen first, and the email sign-in waits on a
+/// message that can take minutes to arrive: at five minutes a late link landed
+/// on a closed port, `ERR_CONNECTION_REFUSED` and nothing to explain it. An idle
+/// loopback socket costs nothing. It also bounds how long `cloud_login_url`
+/// keeps reusing the same in-flight attempt (nonce + port): past this window the
+/// listener is gone, so a fresh attempt is minted.
+pub(crate) const LISTEN_TIMEOUT: Duration = Duration::from_secs(30 * 60);
 
-const OK_PAGE: &str = "<!doctype html><html lang=\"es\"><head><meta charset=\"utf-8\">\
-<title>Hoard</title><meta name=\"viewport\" content=\"width=device-width,initial-scale=1\">\
-<style>body{font-family:system-ui,-apple-system,sans-serif;background:#0a0a0a;color:#e5e5e5;\
-display:flex;min-height:100vh;align-items:center;justify-content:center;margin:0}\
-.b{text-align:center;padding:2rem}h1{color:#34d399;font-size:1.5rem;margin:0 0 .5rem}\
-p{color:#a1a1aa;margin:0}</style></head><body><div class=\"b\">\
-<h1>Sesion iniciada</h1><p>Ya puedes volver a la app de Hoard. Puedes cerrar esta pestana.</p>\
-</div></body></html>";
+/// What the browser shows once the app has the tokens, in the browser's language.
+/// The sentences are the web's own `callback.desktop_return`, so the two pages
+/// the user sees one after the other say the same thing. This used to be a single
+/// Spanish page, without its accents, for everybody.
+fn return_sentence(lang: &str) -> Option<&'static str> {
+    Some(match lang {
+        "en" => "Signed in! Head back to the Hoard app and close this tab.",
+        "es" => "¡Sesión iniciada! Vuelve a la app de Hoard, ya puedes cerrar esta pestaña.",
+        "de" => "Angemeldet! Geh zurück zur Hoard-App, diesen Tab kannst du schließen.",
+        "fr" => "Connecté ! Retourne dans l'app Hoard et ferme cet onglet.",
+        "it" => "Accesso effettuato! Torna all'app Hoard e chiudi questa scheda.",
+        "ja" => "ログインしました！Hoardアプリに戻ってください。このタブは閉じて構いません。",
+        "pt" => "Sessão iniciada! Volta à app Hoard e fecha este separador.",
+        "zh" => "已登录！请回到 Hoard 应用，这个标签页可以关闭了。",
+        _ => return None,
+    })
+}
 
-const WAIT_PAGE: &str = "<!doctype html><html lang=\"es\"><head><meta charset=\"utf-8\">\
+const WAIT_PAGE: &str = "<!doctype html><html lang=\"en\"><head><meta charset=\"utf-8\">\
 <title>Hoard</title></head><body style=\"font-family:system-ui,sans-serif;background:#0a0a0a;\
-color:#a1a1aa\"><p style=\"padding:2rem\">Esperando el inicio de sesion de Hoard...</p>\
+color:#a1a1aa\"><p style=\"padding:2rem\">Waiting for the Hoard sign-in...</p>\
 </body></html>";
+
+/// The first language in `Accept-Language` that we have a sentence for, English
+/// otherwise. Browsers list the tags in order of preference, so the q-values are
+/// not read.
+fn return_message(accept_language: Option<&str>) -> (String, &'static str) {
+    accept_language
+        .into_iter()
+        .flat_map(|header| header.split(','))
+        .filter_map(|tag| tag.split(';').next())
+        .filter_map(|tag| tag.trim().split('-').next())
+        .map(str::to_ascii_lowercase)
+        .find_map(|lang| return_sentence(&lang).map(|sentence| (lang, sentence)))
+        .unwrap_or_else(|| ("en".to_string(), return_sentence("en").unwrap_or_default()))
+}
+
+fn ok_page(accept_language: Option<&str>) -> String {
+    let (lang, message) = return_message(accept_language);
+    format!(
+        "<!doctype html><html lang=\"{lang}\"><head><meta charset=\"utf-8\">\
+<title>Hoard</title><meta name=\"viewport\" content=\"width=device-width,initial-scale=1\">\
+<style>body{{font-family:system-ui,-apple-system,sans-serif;background:#0a0a0a;color:#e5e5e5;\
+display:flex;min-height:100vh;align-items:center;justify-content:center;margin:0}}\
+p{{text-align:center;padding:2rem;font-size:1.25rem;max-width:32rem}}</style></head>\
+<body><p>{message}</p></body></html>"
+    )
+}
 
 /// Bind an ephemeral loopback port and spawn a one-shot HTTP server that
 /// captures the OAuth callback. Takes the single-use `state` nonce minted by
@@ -70,6 +108,9 @@ pub async fn start(app: AppHandle, state: String) -> Result<u16> {
                     let Ok((stream, _)) = accepted else { continue };
                     match serve(stream, &expected_state).await {
                         Ok(Some((access, refresh))) => {
+                            // The one line that says the browser leg worked: a
+                            // sign-in that never gets here failed on the web.
+                            tracing::info!("loopback OAuth: callback received, handing it to the app");
                             // Reuse the existing deep-link path: synthesize the
                             // same `hoard://auth/callback?…` URL the frontend's
                             // listener already parses, then bring the window up.
@@ -137,6 +178,11 @@ async fn serve(mut stream: TcpStream, expected_state: &str) -> Result<Option<(St
     let Some(line) = head.lines().next() else {
         return Ok(None);
     };
+    let accept_language = head.lines().find_map(|h| {
+        let (name, value) = h.split_once(':')?;
+        name.eq_ignore_ascii_case("accept-language")
+            .then(|| value.trim())
+    });
     // "GET /callback?access_token=…&refresh_token=…&state=… HTTP/1.1"
     let target = line.split_whitespace().nth(1).unwrap_or("");
     let Some((_, query)) = target.split_once('?') else {
@@ -146,7 +192,7 @@ async fn serve(mut stream: TcpStream, expected_state: &str) -> Result<Option<(St
 
     match parse_callback(query, expected_state) {
         Some((access, refresh)) => {
-            respond(&mut stream, OK_PAGE).await?;
+            respond(&mut stream, &ok_page(accept_language)).await?;
             Ok(Some((access, refresh)))
         }
         None => {
@@ -281,6 +327,47 @@ mod tests {
         // The pre-fix forged-callback shape: tokens with no state must not pass.
         let q = "access_token=tok&refresh_token=ref";
         assert_eq!(parse_callback(q, "abc123"), None);
+    }
+
+    #[test]
+    fn the_return_page_follows_the_browser_language() {
+        assert_eq!(return_message(Some("es-ES,es;q=0.9,en;q=0.8")).0, "es");
+        assert_eq!(return_message(Some("pt-BR")).0, "pt");
+        // A language we have no sentence for falls through to the next one.
+        assert_eq!(return_message(Some("nl-NL,nl;q=0.9,de;q=0.8")).0, "de");
+        assert_eq!(return_message(Some("nl")).0, "en");
+        assert_eq!(return_message(None).0, "en");
+    }
+
+    /// Over a real socket: the header is read from the request, and the length is
+    /// counted in bytes, which the accents and the CJK sentences depend on.
+    #[tokio::test]
+    async fn serves_the_callback_page_in_the_browser_language() {
+        let listener = TcpListener::bind(("127.0.0.1", 0)).await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let server = tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.unwrap();
+            serve(stream, "nonce").await.unwrap()
+        });
+        let mut client = TcpStream::connect(("127.0.0.1", port)).await.unwrap();
+        client
+            .write_all(
+                b"GET /callback?access_token=tok&refresh_token=ref&state=nonce HTTP/1.1\r\n\
+                  Host: 127.0.0.1\r\nAccept-Language: ja,en;q=0.8\r\n\r\n",
+            )
+            .await
+            .unwrap();
+        let mut response = String::new();
+        client.read_to_string(&mut response).await.unwrap();
+
+        assert_eq!(
+            server.await.unwrap(),
+            Some(("tok".to_string(), "ref".to_string()))
+        );
+        let (head, body) = response.split_once("\r\n\r\n").unwrap();
+        assert!(head.contains(&format!("Content-Length: {}", body.len())));
+        assert!(body.contains("lang=\"ja\""));
+        assert!(body.contains(return_sentence("ja").unwrap()));
     }
 
     #[test]

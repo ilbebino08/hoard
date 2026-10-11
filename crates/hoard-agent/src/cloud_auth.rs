@@ -872,15 +872,12 @@ pub async fn refresh_freshest() -> Result<Tokens> {
     // Holding the lock across the network call is what serialises this.
     let mut last = refresh_gate().lock().await;
 
-    if let Some((at, tokens)) = last.as_ref() {
-        if at.elapsed() < REFRESH_REUSE_WINDOW {
-            return Ok(tokens.clone());
-        }
-    }
-
     let Some(sess) = load_session()? else {
         bail!("no Cloud session; sign in again");
     };
+    if let Some(tokens) = reusable(last.as_ref(), &sess.refresh) {
+        return Ok(tokens);
+    }
     let attempted = sess.refresh.clone();
     match refresh(&sess.refresh).await {
         Ok(tokens) => {
@@ -902,6 +899,16 @@ pub async fn refresh_freshest() -> Result<Tokens> {
         }
         Err(e) => Err(e),
     }
+}
+
+/// The last rotation, if it is recent **and** still the session on disk. Checking
+/// only the clock handed a new login the previous account's pair: sign out and
+/// back in with another account inside the window, and the engine started on the
+/// old one, context included, until the next refresh 45 minutes later.
+fn reusable(last: Option<&(Instant, Tokens)>, on_disk_refresh: &str) -> Option<Tokens> {
+    let (at, tokens) = last?;
+    (at.elapsed() < REFRESH_REUSE_WINDOW && tokens.refresh == on_disk_refresh)
+        .then(|| tokens.clone())
 }
 
 /// Decides whether the session on disk is any use for healing a
@@ -939,6 +946,34 @@ mod tests {
     fn refuses_to_replay_the_token_that_just_failed() {
         // The same token on disk: nobody rotated anything, the session really is dead.
         assert!(adoptable("ours", Some(&disk("ours"))).is_none());
+    }
+
+    fn rotated(refresh: &str, ago: Duration) -> (Instant, Tokens) {
+        let tokens = Tokens {
+            access: format!("jwt-of-{refresh}"),
+            refresh: refresh.to_string(),
+        };
+        (Instant::now() - ago, tokens)
+    }
+
+    #[test]
+    fn a_burst_reuses_the_rotation_it_just_did() {
+        let last = rotated("account-a-2", Duration::from_secs(5));
+        let got = reusable(Some(&last), "account-a-2").expect("same session, inside the window");
+        assert_eq!(got.access, "jwt-of-account-a-2");
+    }
+
+    #[test]
+    fn a_new_login_inside_the_window_is_not_handed_the_old_pair() {
+        // Account A rotated 5 s ago; the user signed in to B since, so B is on disk.
+        let last = rotated("account-a-2", Duration::from_secs(5));
+        assert!(reusable(Some(&last), "account-b-1").is_none());
+    }
+
+    #[test]
+    fn an_old_rotation_is_not_reused() {
+        let last = rotated("account-a-2", REFRESH_REUSE_WINDOW + Duration::from_secs(1));
+        assert!(reusable(Some(&last), "account-a-2").is_none());
     }
 
     #[test]
