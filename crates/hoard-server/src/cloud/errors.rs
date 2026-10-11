@@ -1,5 +1,5 @@
 use axum::{
-    http::StatusCode,
+    http::{header, StatusCode},
     response::{IntoResponse, Json, Response},
 };
 use serde::Serialize;
@@ -25,6 +25,13 @@ pub enum CloudError {
     /// A Pro feature is locked (not on Pro, no active trial) → HTTP 402.
     PaymentRequired {
         feature: &'static str,
+    },
+    /// A per-account cap on a costly action → HTTP 429. `retry_after_secs`
+    /// goes in the body as well as `Retry-After`, the order clients read it.
+    TooManyRequests {
+        code: &'static str,
+        message: String,
+        retry_after_secs: i64,
     },
     Db(sqlx::Error),
     Internal(anyhow::Error),
@@ -54,6 +61,29 @@ impl IntoResponse for CloudError {
                 "pro_required",
                 format!("Pro feature '{feature}' is locked"),
             ),
+            CloudError::TooManyRequests {
+                code,
+                message,
+                retry_after_secs,
+            } => {
+                #[derive(Serialize)]
+                struct Body<'a> {
+                    error: &'a str,
+                    code: &'static str,
+                    retry_after_seconds: i64,
+                }
+                let retry = (*retry_after_secs).clamp(1, 86_400);
+                return (
+                    StatusCode::TOO_MANY_REQUESTS,
+                    [(header::RETRY_AFTER, retry.to_string())],
+                    Json(Body {
+                        error: message,
+                        code,
+                        retry_after_seconds: retry,
+                    }),
+                )
+                    .into_response();
+            }
             CloudError::Db(e) => {
                 tracing::error!(error = %e, "db error");
                 (

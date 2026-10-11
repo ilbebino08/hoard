@@ -45,6 +45,35 @@ const EXPORT_TTL_DAYS: i64 = 7;
 /// so the link never outlives the bytes it points at.
 const LINK_TTL: Duration = Duration::from_secs(6 * 24 * 3600);
 
+/// Exports one account may request in any rolling 24 h. Each one streams every
+/// live blob out of R2 and parks a full-size ZIP there for a week. Three still
+/// covers "export, tidy up, export again to check", which is what the first
+/// account to trip it did on 11-10: 34 MB, then 20 MB twice, six minutes apart.
+pub const EXPORTS_PER_DAY: usize = 3;
+
+/// Seconds until this account may request another export, or `None` while it
+/// is under [`EXPORTS_PER_DAY`]. Failed jobs don't count (the user got nothing
+/// out of them), and neither does a reaped one, which ends up `failed` too.
+pub async fn export_cap_wait(pool: &sqlx::PgPool, user_id: Uuid) -> sqlx::Result<Option<i64>> {
+    // Seconds until each counted job leaves the window, oldest first.
+    let ageing_out: Vec<(i64,)> = sqlx::query_as(
+        "SELECT ceil(extract(epoch FROM requested_at + interval '24 hours' - now()))::bigint
+           FROM export_jobs
+          WHERE user_id = $1 AND status <> 'failed'
+            AND requested_at > now() - interval '24 hours'
+          ORDER BY requested_at",
+    )
+    .bind(user_id)
+    .fetch_all(pool)
+    .await?;
+    if ageing_out.len() < EXPORTS_PER_DAY {
+        return Ok(None);
+    }
+    // Jobs from before the cap existed can put more than three in the window;
+    // a slot opens once enough of them age out to drop below it.
+    Ok(Some(ageing_out[ageing_out.len() - EXPORTS_PER_DAY].0.max(1)))
+}
+
 /// Spawn the daemon. Idempotent per process; call once from `cloud::run`.
 pub fn spawn(state: CloudState) {
     tokio::spawn(async move {

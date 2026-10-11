@@ -3,6 +3,7 @@
 use crate::cloud::abuse;
 use crate::cloud::auth::CloudUser;
 use crate::cloud::errors::CloudError;
+use crate::cloud::export;
 use crate::cloud::plans::Plan;
 use crate::cloud::quota;
 use crate::cloud::state::CloudState;
@@ -1213,6 +1214,22 @@ pub async fn create_export_job(
     .await?;
     if let Some((job_id, status)) = existing {
         return Ok(Json(ExportJobOut { job_id, status }));
+    }
+
+    if let Some(retry_after_secs) = export::export_cap_wait(&state.pool, user.user_id).await? {
+        let wait = if retry_after_secs >= 3600 {
+            format!("{} h", (retry_after_secs + 3599) / 3600)
+        } else {
+            format!("{} min", (retry_after_secs + 59) / 60)
+        };
+        return Err(CloudError::TooManyRequests {
+            code: "export_limit",
+            message: format!(
+                "You can request {} exports per day. Try again in {wait}.",
+                export::EXPORTS_PER_DAY
+            ),
+            retry_after_secs,
+        });
     }
 
     let row: (Uuid, String) = sqlx::query_as(
