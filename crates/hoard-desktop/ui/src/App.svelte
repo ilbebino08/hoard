@@ -107,6 +107,7 @@
     DEBUG_TOOLS,
     debugDeviceLimit,
     debugPanelOpen,
+    debugTourRequest,
     restoreSurfaces,
   } from "./lib/stores/debug";
   import Button from "./lib/components/Button.svelte";
@@ -247,6 +248,14 @@
     void loadTourSeen().then((seen) => {
       if (seen !== sig) showTour = true;
     });
+  });
+  // Consumed on sight: a dev reload remounts this component with the store
+  // still set, and the tour would open again on its own.
+  $effect(() => {
+    if ($debugTourRequest > 0) {
+      showTour = true;
+      debugTourRequest.set(0);
+    }
   });
   async function finishTour() {
     showTour = false;
@@ -461,11 +470,16 @@
     // Cloud OAuth callback handler: when the system browser hits
     // `hoard://auth/callback#access_token=…`, the Rust deep-link plugin
     // emits `deep-link://new-url`; we parse the fragment and call
-    // `cloud_complete_login`. Route to /account on success so the user
-    // sees their freshly-loaded plan + usage.
+    // `cloud_complete_login`. A sign-in started from the wizard ends on its
+    // last step, where a self-hosted one ends too (sync mode, autostart);
+    // from anywhere else it lands on /account, with the fresh plan and usage.
     initCloudDeepLink(
       () => {
-        push("/account");
+        push(
+          router.location.startsWith("/onboarding")
+            ? "/onboarding/done"
+            : "/account",
+        );
         toastSuccess($_("account.signin_success"));
       },
       (e) => {
@@ -829,7 +843,7 @@
 {:else if isAppRoute}
   <div class="flex h-full">
     <aside
-      class="sidebar-glass flex {narrow ? 'is-narrow' : 'w-60'} shrink-0 flex-col border-r border-white/[0.08] sidebar-fill backdrop-blur-xl shadow-[inset_-1px_0_0_0_rgba(255,255,255,0.06)]"
+      class="sidebar-glass flex {narrow ? 'is-narrow' : 'w-60'} shrink-0 flex-col border-r border-white/[0.08] sidebar-fill shadow-[inset_-1px_0_0_0_rgba(255,255,255,0.06)]"
     >
       <!-- On Windows the title bar carries the name, the version, the activity
            toggle and the update alert, so this row would only repeat it. -->
@@ -1034,6 +1048,7 @@
         {/if}
         <button
           type="button"
+          data-tour="sync"
           onclick={toggleGlobalSync}
           disabled={globalSyncBusy}
           class="keep-emerald flex w-full items-center justify-center gap-2 rounded-md border bg-black px-3 py-2 text-sm font-medium transition-colors {globalSync
@@ -1153,7 +1168,7 @@
       aria-expanded={$notifOpen}
       class="pointer-events-auto relative flex h-8 w-8 items-center justify-center rounded-lg border transition-colors {$notifOpen
         ? 'border-emerald-500/40 bg-emerald-500/10 text-emerald-300'
-        : 'border-white/[0.08] bg-layer-2 text-zinc-400 backdrop-blur-md hover:text-zinc-100'}"
+        : 'border-white/[0.08] bg-layer-2 text-zinc-400 hover:text-zinc-100'}"
     >
       <AnimIcon icon={Bell} on={$notifOpen} kind="ring" size={15} />
       {#if $notifStore.length > 0}
@@ -1170,7 +1185,7 @@
       aria-expanded={$eyeOpen}
       class="pointer-events-auto flex h-8 w-8 items-center justify-center rounded-lg border transition-colors {$eyeOpen
         ? 'border-emerald-500/40 bg-emerald-500/10 text-emerald-300'
-        : 'border-white/[0.08] bg-layer-2 text-zinc-400 backdrop-blur-md hover:text-zinc-100'}"
+        : 'border-white/[0.08] bg-layer-2 text-zinc-400 hover:text-zinc-100'}"
     >
       <AnimIcon icon={Eye} iconOff={EyeOff} on={$eyeOpen} kind="pop" size={15} />
     </button>
@@ -1180,7 +1195,7 @@
   <!-- Eye dropdown, anchored below the eye button, top-right. -->
   {#if $eyeOpen}
     <div
-      class="pinned-panel fixed right-8 top-14 z-[61] w-72 overflow-hidden rounded-2xl border border-white/[0.08] bg-layer-3 shadow-xl backdrop-blur-xl"
+      class="pinned-panel fixed right-8 top-14 z-[61] w-72 overflow-hidden rounded-2xl border border-white/[0.08] bg-layer-3 shadow-xl"
       transition:fly={{ y: -8, duration: 180 }}
     >
       <EyePanel {now} />

@@ -50,10 +50,10 @@
           onclick={() => pick(l.code)}
           disabled={busy}
           aria-pressed={$locale === l.code}
-          class="rounded-2xl border px-4 py-3 text-left text-sm font-medium transition focus:outline-none focus-visible:ring-2 focus-visible:ring-[var(--color-accent)]/50 disabled:opacity-60 {$locale ===
+          class="rounded-2xl border bg-black px-4 py-3 text-left text-sm font-medium transition-colors disabled:opacity-60 {$locale ===
           l.code
-            ? 'border-[var(--color-accent)] bg-[var(--color-accent)]/15 text-zinc-50'
-            : 'border-white/[0.08] bg-layer-2 text-zinc-200 hover:border-white/[0.14] hover:bg-layer-hover'}"
+            ? 'border-emerald-600 text-emerald-400'
+            : 'border-zinc-800 text-zinc-300 hover:border-zinc-600 hover:text-zinc-100'}"
         >
           {l.label}
         </button>
@@ -61,9 +61,9 @@
     </div>
 
     <div class="mt-8 flex justify-end">
-      <Button variant="primary" size="lg" onclick={next}>
+      <Button variant="outline" size="lg" onclick={next}>
         {$_("common.continue")}
-        <ArrowRight size={16} />
+        <ArrowRight size={16} data-anim="nudge" />
       </Button>
     </div>
   </div>

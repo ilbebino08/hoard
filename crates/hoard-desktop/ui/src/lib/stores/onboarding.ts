@@ -21,9 +21,10 @@ const KEY_TOUR_SEEN = "tour_seen_for";
 
 /** Routes that make up the wizard, in order.
  *
- * The path forks at `choose`: the Cloud branch is `language → choose → terms`
- * (3 steps), the self-hosted branch is `language → choose → server → token →
- * done` (5 steps). `WizardShell` sizes the progress dots per branch. */
+ * The path forks at `choose`: the Cloud branch is `language → choose → terms →
+ * done` (4 steps, the browser sign-in sits between the last two), the
+ * self-hosted branch is `language → choose → server → token → done` (5 steps).
+ * `WizardShell` sizes the progress dots per branch. */
 export type OnboardingStep =
   | "language"
   | "choose"

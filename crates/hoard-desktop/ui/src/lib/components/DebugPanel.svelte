@@ -9,6 +9,7 @@
    * users get.
    */
   import { X, Bug } from "@lucide/svelte";
+  import { push, router } from "svelte-spa-router";
 
   import { cloud } from "../stores/cloud";
   import {
@@ -20,10 +21,30 @@
     cloudOverrides,
     debugDeviceLimit,
     debugPanelOpen,
+    debugTourRequest,
     setOverrides,
+    wizardPreview,
   } from "../stores/debug";
+  import { routeForStep, type OnboardingStep } from "../stores/onboarding";
 
   const GB = 1024 ** 3;
+
+  // Cloud branch first, then the self-hosted one, in the order a user meets them.
+  const WIZARD_STEPS: OnboardingStep[] = ["language", "choose", "terms", "server", "token", "done"];
+
+  function previewStep(step: OnboardingStep) {
+    wizardPreview.set(true);
+    push(routeForStep(step));
+  }
+
+  function replayTour() {
+    wizardPreview.set(false);
+    debugTourRequest.update((n) => n + 1);
+  }
+
+  $effect(() => {
+    if (!router.location.startsWith("/onboarding")) wizardPreview.set(false);
+  });
 
   const tune = $derived($surfaceTune ?? SURFACE_DEFAULTS);
   function setTune(key: keyof SurfaceTune, value: number) {
@@ -95,7 +116,7 @@
 
 {#if $debugPanelOpen}
   <div
-    class="fixed bottom-4 right-4 z-[200] max-h-[80vh] w-80 overflow-y-auto rounded-lg border border-violet-500/40 bg-layer-3 p-3 font-mono text-xs text-zinc-300 shadow-2xl backdrop-blur"
+    class="fixed bottom-4 right-4 z-[200] max-h-[80vh] w-80 overflow-y-auto rounded-lg border border-violet-500/40 bg-layer-3 p-3 font-mono text-xs text-zinc-300 shadow-2xl"
   >
     <header class="mb-3 flex items-center justify-between">
       <span class="flex items-center gap-1.5 font-semibold text-violet-300">
@@ -221,6 +242,44 @@
         </p>
       {/if}
     {/if}
+    <div class="mt-4 border-t border-white/[0.08] pt-3">
+      <span class="mb-2 block font-semibold text-violet-300">onboarding</span>
+      <button
+        type="button"
+        class="mb-2 w-full rounded border border-zinc-700 px-2 py-1 hover:border-violet-400 hover:text-violet-200"
+        onclick={replayTour}
+      >
+        replay the tour from the start
+      </button>
+      <span class="mb-1 block text-zinc-500">welcome, step by step</span>
+      <div class="mb-2 grid grid-cols-3 gap-1">
+        {#each WIZARD_STEPS as step (step)}
+          {@const here = router.location === routeForStep(step)}
+          <button
+            type="button"
+            class="rounded border px-1 py-1 {here
+              ? 'border-violet-400 text-violet-200'
+              : 'border-zinc-700 hover:border-violet-400 hover:text-violet-200'}"
+            onclick={() => previewStep(step)}
+          >
+            {step}
+          </button>
+        {/each}
+      </div>
+      {#if $wizardPreview}
+        <button
+          type="button"
+          class="mb-2 w-full rounded border border-zinc-700 px-2 py-1 hover:border-emerald-500 hover:text-emerald-300"
+          onclick={() => push("/account")}
+        >
+          back to the app
+        </button>
+        <p class="text-[10px] leading-tight text-amber-400/80">
+          Preview: the wizard's buttons only move between steps. Picking a
+          language is real.
+        </p>
+      {/if}
+    </div>
     <div class="mt-4 border-t border-white/[0.08] pt-3">
       <span class="mb-2 block font-semibold text-violet-300">surfaces</span>
       {#each SURFACE_SLIDERS as sl (sl.key)}

@@ -55,7 +55,7 @@
 </script>
 
 <div
-  class="fixed inset-0 z-[120] flex items-center justify-center bg-zinc-950/85 p-6 backdrop-blur-sm"
+  class="fixed inset-0 z-[120] flex items-center justify-center bg-zinc-950/85 p-6"
   role="dialog"
   aria-modal="true"
   aria-label={$_("account_deleted.title")}

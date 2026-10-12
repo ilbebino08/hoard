@@ -36,12 +36,12 @@
       <button
         type="button"
         onclick={chooseSelfHost}
-        class="flex flex-col items-start gap-3 rounded-2xl border border-zinc-700 bg-layer-2 p-5 text-left transition hover:border-zinc-500 hover:bg-layer-hover focus:outline-none focus-visible:ring-2 focus-visible:ring-zinc-400/50"
+        class="anim-host flex flex-col items-start gap-3 rounded-2xl border border-zinc-800 bg-black p-5 text-left transition-colors hover:border-zinc-600"
       >
         <span
-          class="inline-flex h-10 w-10 items-center justify-center rounded-lg bg-zinc-800 text-zinc-100"
+          class="inline-flex h-10 w-10 items-center justify-center rounded-lg border border-zinc-800 bg-black text-zinc-200"
         >
-          <Server size={20} />
+          <Server size={20} data-anim="pop" />
         </span>
         <span class="text-sm font-semibold text-zinc-50">
           {$_("choose.selfhost_title")}
@@ -51,21 +51,21 @@
         </span>
       </button>
 
-      <!-- Gmail / Cloud — green -->
+      <!-- Cloud, the accent -->
       <button
         type="button"
         onclick={chooseCloud}
-        class="flex flex-col items-start gap-3 rounded-2xl border border-emerald-500/40 bg-emerald-600 p-5 text-left transition hover:bg-emerald-500 focus:outline-none focus-visible:ring-2 focus-visible:ring-emerald-400/50"
+        class="anim-host flex flex-col items-start gap-3 rounded-2xl border border-emerald-800/80 bg-black p-5 text-left transition-colors hover:border-emerald-600"
       >
         <span
-          class="inline-flex h-10 w-10 items-center justify-center rounded-lg bg-emerald-700/60 text-emerald-50"
+          class="inline-flex h-10 w-10 items-center justify-center rounded-lg border border-emerald-800/80 bg-black text-emerald-500"
         >
-          <Cloud size={20} />
+          <Cloud size={20} data-anim="pop" />
         </span>
-        <span class="text-sm font-semibold text-emerald-50">
+        <span class="text-sm font-semibold text-emerald-400">
           {$_("choose.cloud_title")}
         </span>
-        <span class="text-xs leading-relaxed text-emerald-100/80">
+        <span class="text-xs leading-relaxed text-zinc-400">
           {$_("choose.cloud_desc")}
         </span>
       </button>

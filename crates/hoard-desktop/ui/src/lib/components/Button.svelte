@@ -5,6 +5,11 @@
    * - `primary`  , emerald, used for the page's main action (one per screen).
    * - `secondary`, neutral, used for "Back" / "Cancel" style actions.
    * - `ghost`    , transparent, used inside cards or as quiet icon buttons.
+   * - `outline`  , black with a dark accent border, the sidebar Sync / Automatic
+   *   look, for a main action that should not be a slab of green.
+   * - `muted`    , the same in neutral, for the action beside it.
+   *
+   * Both stay pure black under the pointer: only the border and the text light up.
    */
   import type { Snippet } from "svelte";
   import type {
@@ -14,7 +19,7 @@
   import { Loader2 } from "@lucide/svelte";
   import { glow } from "../actions/glow";
 
-  type Variant = "primary" | "secondary" | "ghost" | "danger";
+  type Variant = "primary" | "secondary" | "ghost" | "danger" | "outline" | "muted";
   type Size = "md" | "lg";
 
   type Props = {
@@ -60,6 +65,12 @@
     danger:
       "bg-red-600 text-red-50 shadow-[0_1px_0_0_rgba(255,255,255,0.15)_inset,0_6px_20px_-8px_rgba(239,68,68,0.5)] " +
       "hover:bg-red-500 disabled:bg-zinc-800 disabled:text-zinc-500 disabled:shadow-none",
+    outline:
+      "border border-emerald-800/80 bg-black text-emerald-500 hover:border-emerald-600 hover:text-emerald-400 " +
+      "disabled:opacity-60 disabled:hover:border-emerald-800/80 disabled:hover:text-emerald-500",
+    muted:
+      "border border-zinc-800 bg-black text-zinc-300 hover:border-zinc-600 hover:text-zinc-100 " +
+      "disabled:opacity-60 disabled:hover:border-zinc-800 disabled:hover:text-zinc-300",
   };
 
   const sizeClasses: Record<Size, string> = {
@@ -71,16 +82,18 @@
   // keyboard-focusable, so the button does not have to carry its own (which also
   // had to be remembered and tinted in every variant).
   const baseClass =
-    "glow inline-flex items-center justify-center gap-2 rounded-[var(--radius-control)] font-medium tracking-[-0.005em] " +
+    "inline-flex items-center justify-center gap-2 rounded-[var(--radius-control)] font-medium tracking-[-0.005em] " +
     "transition-all duration-150 active:scale-[0.97] " +
     "disabled:cursor-not-allowed disabled:active:scale-100";
+  // The pointer highlight is white: on the black ones it reads as a grey haze.
+  const glowClass = $derived(variant === "outline" || variant === "muted" ? "" : "glow");
 </script>
 
 {#if href}
   <a
     {href}
     use:glow
-    class="{baseClass} {variantClasses[variant]} {sizeClasses[size]} {extraClass}"
+    class="{baseClass} {glowClass} {variantClasses[variant]} {sizeClasses[size]} {extraClass}"
     aria-disabled={disabled || loading ? "true" : undefined}
     {...rest}
   >
@@ -93,7 +106,7 @@
   <button
     {type}
     use:glow
-    class="{baseClass} {variantClasses[variant]} {sizeClasses[size]} {extraClass}"
+    class="{baseClass} {glowClass} {variantClasses[variant]} {sizeClasses[size]} {extraClass}"
     disabled={disabled || loading}
     {...rest}
   >

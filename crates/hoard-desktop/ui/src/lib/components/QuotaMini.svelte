@@ -126,6 +126,7 @@
 
 {#if src.show}
   <div
+    data-tour="quota"
     class="glow space-y-1.5 rounded-md px-1 py-0.5 {flashing ? 'quota-alarm' : ''}"
     data-anim={flashing ? "alarm" : undefined}
     title={$_("quota.label")}

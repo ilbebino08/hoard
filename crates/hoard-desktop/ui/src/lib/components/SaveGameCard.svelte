@@ -318,7 +318,7 @@
        botón 2:3 / cuadrada, que solo daba dos puntos de todo ese recorrido. -->
   {#if removing}
     <div
-      class="absolute inset-0 z-30 flex items-center justify-center gap-2 bg-black/60 text-sm text-zinc-200 backdrop-blur-[2px]"
+      class="absolute inset-0 z-30 flex items-center justify-center gap-2 bg-black/60 text-sm text-zinc-200"
       aria-live="polite"
     >
       <Loader2 size={15} class="animate-spin" />
@@ -396,13 +396,13 @@
         aria-label={$_("dashboard.menu_open")}
         title={$_("dashboard.menu_open")}
         aria-expanded={menuOpen}
-        class="flex h-7 w-7 items-center justify-center rounded-md border border-white/[0.08] bg-layer-2 text-zinc-300 backdrop-blur-md transition-colors hover:border-white/[0.18] hover:text-zinc-50"
+        class="flex h-7 w-7 items-center justify-center rounded-md border border-white/[0.08] bg-layer-2 text-zinc-300 transition-colors hover:border-white/[0.18] hover:text-zinc-50"
       >
         <MoreHorizontal size={14} />
       </button>
       {#if menuOpen}
         <div
-          class="absolute right-0 top-full z-20 mt-1 w-44 overflow-hidden rounded-lg border border-white/[0.08] bg-layer-3 p-1 shadow-xl backdrop-blur-xl"
+          class="absolute right-0 top-full z-20 mt-1 w-44 overflow-hidden rounded-lg border border-white/[0.08] bg-layer-3 p-1 shadow-xl"
         >
           <button
             type="button"

@@ -228,6 +228,7 @@
         seen = true;
       }
     }
+    if (saves.length === 0) return "0";
     return seen ? String(sum) : "…";
   });
   const lastBackupAt = $derived.by(() => {
@@ -698,11 +699,14 @@
     </div>
   {/if}
 
-  <!-- Resumen de toda la biblioteca. Vivía al pie de la rejilla, donde con
-       muchos juegos no se veía sin bajar del todo; estos cuatro números son
-       justo lo que se mira de un vistazo, así que van antes de las tarjetas. -->
-  {#if !loading && saves.length > 0}
+  <!-- The whole library at a glance. It used to sit below the grid, out of
+       sight with many games; these four numbers are what gets read first, so
+       they come before the cards. Always there, at zero with no saves or with
+       the service stopped: the tour points at it to explain where the bytes
+       live. -->
+  {#if !loading}
     <div
+      data-tour="storage"
       class="panel relative mb-5 grid grid-cols-2 gap-x-4 gap-y-5 px-6 py-5 md:grid-cols-4"
     >
       <div>
@@ -755,7 +759,9 @@
         {/if}
       </div>
     </div>
+  {/if}
 
+  {#if !loading && saves.length > 0}
     <!-- Ya no hay selector de forma de carátula: el tamaño y el encuadre se
          arrastran desde la esquina de cualquier tarjeta, como en la
          biblioteca. -->
@@ -856,7 +862,7 @@
           {$_("dashboard.no_saves_body")}
         </p>
         <div class="mt-6">
-          <Button onclick={() => push("/library")}>
+          <Button variant="outline" onclick={() => push("/library")}>
             <Plus size={15} data-anim="pop" />
             {$_("dashboard.add_game")}
           </Button>

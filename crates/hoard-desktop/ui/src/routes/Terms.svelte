@@ -7,12 +7,13 @@
    */
   import { push } from "svelte-spa-router";
   import { fly } from "svelte/transition";
-  import { ExternalLink } from "@lucide/svelte";
+  import { ExternalLink, ArrowRight } from "@lucide/svelte";
   import { _ } from "svelte-i18n";
   import Button from "../lib/components/Button.svelte";
   import WizardShell from "../lib/components/WizardShell.svelte";
   import { startCloudLogin, openExternal } from "../lib/stores/cloud";
   import { toastError } from "../lib/stores/toasts";
+  import { wizardPreview } from "../lib/stores/debug";
 
   const TERMS_URL = "https://hoard.services/legal/terms";
   const PRIVACY_URL = "https://hoard.services/legal/privacy";
@@ -21,7 +22,7 @@
   let loading = $state(false);
 
   async function continueLogin() {
-    if (!accepted || loading) return;
+    if (!accepted || loading || $wizardPreview) return;
     loading = true;
     try {
       await startCloudLogin();
@@ -79,12 +80,13 @@
 
     <div class="mt-8 flex justify-end">
       <Button
-        variant="primary"
+        variant="outline"
         size="lg"
         disabled={!accepted || loading}
         onclick={continueLogin}
       >
         {$_("onboarding.terms_continue")}
+        <ArrowRight size={16} data-anim="nudge" />
       </Button>
     </div>
   </div>

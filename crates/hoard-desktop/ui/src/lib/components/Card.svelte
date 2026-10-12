@@ -22,6 +22,6 @@
   estadísticas del Panel usaba `border-white/[0.08]` y la barra lateral
   `border-zinc-800/60`: tres filos distintos para la misma idea.
 -->
-<div class="card-glass panel relative p-6 backdrop-blur-xl {extraClass}">
+<div class="card-glass panel relative p-6 {extraClass}">
   {@render children()}
 </div>

@@ -111,7 +111,6 @@
 <div
   data-tauri-drag-region
   class="fixed inset-x-0 top-0 z-[400] flex h-8 select-none items-center justify-between border-b border-white/[0.08] bg-layer-3 pl-3 pr-1"
-  class:backdrop-blur-xl={windows}
 >
   <span
     data-tauri-drag-region

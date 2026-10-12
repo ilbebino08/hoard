@@ -19,8 +19,12 @@
 
   const TINTS = {
     info: "border-zinc-700 bg-layer-3 text-zinc-100",
-    success: "border-emerald-500/40 bg-emerald-500/10 text-emerald-100",
-    error: "border-red-500/40 bg-red-500/10 text-red-100",
+    // The tint mixed into the opaque floating surface, not laid over the page:
+    // at /10 the text under the toast showed through.
+    success:
+      "border-emerald-500/40 bg-[color-mix(in_oklch,var(--color-emerald-500)_10%,var(--surface-3))] text-emerald-100",
+    error:
+      "border-red-500/40 bg-[color-mix(in_oklch,var(--color-red-500)_10%,var(--surface-3))] text-red-100",
   } as const;
 
   const ICON_TINTS = {
@@ -39,7 +43,7 @@
   {#each $toasts as toast (toast.id)}
     {@const Icon = ICONS[toast.kind]}
     <div
-      class="card-glass pointer-events-auto flex items-start gap-3 rounded-lg border px-4 py-3 shadow-lg backdrop-blur {TINTS[
+      class="card-glass pointer-events-auto flex items-start gap-3 rounded-lg border px-4 py-3 shadow-lg {TINTS[
         toast.kind
       ]}"
       transition:fly={{ y: 12, duration: 180 }}

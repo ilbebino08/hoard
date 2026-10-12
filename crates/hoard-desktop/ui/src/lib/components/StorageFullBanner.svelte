@@ -24,7 +24,7 @@
 
 {#if $storageBlock}
   <div
-    class="pointer-events-auto overflow-hidden rounded-lg border border-red-500/60 bg-layer-3 shadow-xl backdrop-blur"
+    class="pointer-events-auto overflow-hidden rounded-lg border border-red-500/60 bg-layer-3 shadow-xl"
     role="status"
     aria-live="polite"
     transition:fly={{ y: 12, duration: 180 }}

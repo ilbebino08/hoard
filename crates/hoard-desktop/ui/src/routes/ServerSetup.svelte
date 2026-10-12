@@ -1,7 +1,7 @@
 <script lang="ts">
   import { push } from "svelte-spa-router";
   import { fly } from "svelte/transition";
-  import { ArrowRight, Server, CheckCircle2 } from "@lucide/svelte";
+  import { ArrowRight, Server, CheckCircle2, PlugZap } from "@lucide/svelte";
   import { _ } from "svelte-i18n";
   import Button from "../lib/components/Button.svelte";
   import Input from "../lib/components/Input.svelte";
@@ -9,6 +9,7 @@
   import * as api from "../lib/api";
   import { toastError } from "../lib/stores/toasts";
   import { loadUrl, saveStep, saveUrl } from "../lib/stores/onboarding";
+  import { wizardPreview } from "../lib/stores/debug";
   import { auth } from "../lib/stores/auth";
   import { onMount } from "svelte";
 
@@ -89,6 +90,10 @@
   }
 
   async function next() {
+    if ($wizardPreview) {
+      push("/onboarding/token");
+      return;
+    }
     if (!healthy) {
       await testConnection();
       if (!healthy) return;
@@ -146,11 +151,12 @@
 
       <div class="flex flex-wrap items-center gap-3">
         <Button
-          variant="secondary"
+          variant="muted"
           onclick={testConnection}
           {loading}
           disabled={!url.trim()}
         >
+          {#if !loading}<PlugZap size={16} data-anim="pop" />{/if}
           {$_("server.test_connection")}
         </Button>
         {#if healthy}
@@ -166,12 +172,12 @@
       <div class="flex justify-end pt-2">
         <Button
           type="submit"
-          variant="primary"
+          variant="outline"
           size="lg"
           disabled={!healthy || loading}
         >
           {$_("common.continue")}
-          <ArrowRight size={16} />
+          <ArrowRight size={16} data-anim="nudge" />
         </Button>
       </div>
     </form>

@@ -86,7 +86,7 @@
 </script>
 
 <div
-  class="pinned-panel fixed right-3 top-14 z-[61] w-80 overflow-hidden rounded-2xl border border-white/[0.08] bg-layer-3 shadow-xl backdrop-blur-xl"
+  class="pinned-panel fixed right-3 top-14 z-[61] w-80 overflow-hidden rounded-2xl border border-white/[0.08] bg-layer-3 shadow-xl"
   transition:fly={{ y: -8, duration: 180 }}
 >
   <!-- Header -->

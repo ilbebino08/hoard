@@ -8,6 +8,7 @@
   import WizardShell from "../lib/components/WizardShell.svelte";
   import { signIn } from "../lib/stores/auth";
   import { loadUrl, saveStep } from "../lib/stores/onboarding";
+  import { wizardPreview } from "../lib/stores/debug";
   import { toastError } from "../lib/stores/toasts";
   import { onMount } from "svelte";
 
@@ -20,7 +21,7 @@
 
   onMount(async () => {
     url = await loadUrl();
-    if (!url) {
+    if (!url && !$wizardPreview) {
       // Should not happen, defensively send the user back to the URL step.
       push("/onboarding/server");
     }
@@ -31,6 +32,10 @@
   }
 
   async function submit() {
+    if ($wizardPreview) {
+      push("/onboarding/done");
+      return;
+    }
     inlineError = null;
     const trimmed = token.trim();
     if (!TOKEN_RE.test(trimmed)) {
@@ -89,13 +94,13 @@
       <div class="flex justify-end pt-2">
         <Button
           type="submit"
-          variant="primary"
+          variant="outline"
           size="lg"
           {loading}
           disabled={!token.trim()}
         >
           {$_("token.sign_in")}
-          <ArrowRight size={16} />
+          <ArrowRight size={16} data-anim="nudge" />
         </Button>
       </div>
     </form>

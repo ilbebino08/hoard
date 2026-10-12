@@ -22,9 +22,19 @@
   import { fade } from "svelte/transition";
   import { cubicOut } from "svelte/easing";
   import { onMount, onDestroy, tick } from "svelte";
-  import { Home, Boxes, RotateCw } from "@lucide/svelte";
+  import {
+    Home,
+    Boxes,
+    RotateCw,
+    RefreshCw,
+    Cloud,
+    HardDrive,
+    ArrowLeft,
+    ArrowRight,
+  } from "@lucide/svelte";
   import { _ } from "svelte-i18n";
   import Button from "./Button.svelte";
+  import StepDots from "./StepDots.svelte";
 
   type Props = {
     onClose: () => void;
@@ -47,15 +57,20 @@
      * What the spotlight lands on. `content` highlights the whole content
      * viewport, the real screen the step just navigated to, so the section
      * change is what the user sees. `item` highlights a sidebar rail entry,
-     * used by the concept / Pro steps that must not open their route.
+     * used by the concept / Pro steps that must not open their route. `block`
+     * highlights one part of the page (`blockTarget`) and docks the card under it.
      */
-    focus: "content" | "item";
+    focus: "content" | "item" | "block";
     /** Rail selector, required when `focus === "item"`. */
     itemTarget?: string;
+    blockTarget?: string;
+    /** The step is left out when this is not on screen as the tour opens: the
+     *  storage bar is hidden in the narrow rail. */
+    requires?: string;
     pro?: boolean;
   };
 
-  const steps: Step[] = [
+  const ALL_STEPS: Step[] = [
     {
       icon: HylianUser,
       titleKey: "tour.account_title",
@@ -81,6 +96,23 @@
       itemTarget: '[data-tour-route="/dashboard"]',
     },
     {
+      icon: Cloud,
+      titleKey: "tour.storage_cloud_title",
+      bodyKey: "tour.storage_cloud_body",
+      route: null,
+      focus: "item",
+      itemTarget: '[data-tour="quota"]',
+      requires: '[data-tour="quota"]',
+    },
+    {
+      icon: HardDrive,
+      titleKey: "tour.storage_local_title",
+      bodyKey: "tour.storage_local_body",
+      route: "/dashboard",
+      focus: "block",
+      blockTarget: '[data-tour="storage"]',
+    },
+    {
       icon: MarioStar,
       titleKey: "tour.wrapped_title",
       bodyKey: "tour.wrapped_body",
@@ -98,6 +130,14 @@
       itemTarget: '[data-tour-route="/settings"]',
     },
     {
+      icon: RefreshCw,
+      titleKey: "tour.sync_title",
+      bodyKey: "tour.sync_body",
+      route: null,
+      focus: "item",
+      itemTarget: '[data-tour="sync"]',
+    },
+    {
       icon: RotateCw,
       titleKey: "tour.automatic_title",
       bodyKey: "tour.automatic_body",
@@ -107,6 +147,9 @@
       itemTarget: '[data-tour="automatic"]',
     },
   ];
+  const steps = ALL_STEPS.filter(
+    (s) => !s.requires || document.querySelector(s.requires),
+  );
 
   const CARD_W = 340;
   const MARGIN = 16;
@@ -135,6 +178,13 @@
   let spotRect = $state<Rect | null>(null);
   let anchorRect = $state<Rect | null>(null);
 
+  // The spotlight glides only between steps. Any other change (the window
+  // resized or zoomed, the rail folding into icons) has to land right on the
+  // target at once instead of chasing it for half a second.
+  let gliding = $state(false);
+  let glideTimer: ReturnType<typeof setTimeout> | undefined;
+  let contentObserver: ResizeObserver | undefined;
+
   function rectOf(selector: string | undefined, pad: number): Rect | null {
     if (!selector) return null;
     const el = document.querySelector(selector) as HTMLElement | null;
@@ -150,10 +200,25 @@
 
   function measure() {
     const spotSel =
-      step.focus === "content" ? '[data-tour="content"]' : step.itemTarget;
+      step.focus === "content"
+        ? '[data-tour="content"]'
+        : step.focus === "block"
+          ? step.blockTarget
+          : step.itemTarget;
     // Hug the content viewport edge-to-edge; give rail items a little room.
     spotRect = rectOf(spotSel, step.focus === "content" ? 0 : PAD);
-    anchorRect = rectOf(step.itemTarget, PAD);
+    anchorRect = step.focus === "block" ? null : rectOf(step.itemTarget, PAD);
+  }
+
+  // A block can paint a moment after its route (the panel waits for the service
+  // before its summary), so keep looking for a second before settling on the
+  // centred fallback.
+  let findTimer: ReturnType<typeof setTimeout> | undefined;
+  function measureUntilFound(tries = 10) {
+    clearTimeout(findTimer);
+    measure();
+    if (spotRect || tries === 0) return;
+    findTimer = setTimeout(() => measureUntilFound(tries - 1), 100);
   }
 
   const spotStyle = $derived(
@@ -174,11 +239,17 @@
     }
     const gap = 18;
     let left = ref.left + ref.width + gap;
+    let top = ref.top - 6;
     if (left + CARD_W + MARGIN > vw) {
       left = ref.left - CARD_W - gap;
-      if (left < MARGIN) left = MARGIN;
+      if (left < MARGIN) {
+        // No room on either side, a block as wide as the page: under it, or
+        // over it when it reaches the bottom.
+        left = Math.min(Math.max(MARGIN, ref.left), vw - CARD_W - MARGIN);
+        top = ref.top + ref.height + gap;
+        if (top + cardH + MARGIN > vh) top = ref.top - cardH - gap;
+      }
     }
-    let top = ref.top - 6;
     top = Math.min(top, vh - cardH - MARGIN);
     top = Math.max(MARGIN, top);
     return `left:${left}px;top:${top}px;width:${CARD_W}px;`;
@@ -211,13 +282,16 @@
   }
 
   async function applyStep() {
+    gliding = true;
+    clearTimeout(glideTimer);
+    glideTimer = setTimeout(() => (gliding = false), 700);
     navigate(step.route);
     // Let the route swap + any group expansion paint before we measure, then
     // settle focus on the primary action for keyboard users.
     await tick();
     requestAnimationFrame(() =>
       requestAnimationFrame(() => {
-        measure();
+        measureUntilFound();
         focusPrimary();
       }),
     );
@@ -297,12 +371,24 @@
       window.matchMedia?.("(prefers-reduced-motion: reduce)").matches ?? false;
     window.addEventListener("keydown", onKeydown);
     window.addEventListener("resize", onResize);
+    // The window's resize event is not enough. Under 760 px (a narrow window, or
+    // the app zoomed to 160-170 %) the rail folds into icons a frame *after* that
+    // event, so the spotlight kept the old layout and cut through the rail or the
+    // page. The content area changes size whenever the rail does.
+    const content = document.querySelector('[data-tour="content"]');
+    if (content) {
+      contentObserver = new ResizeObserver(() => measure());
+      contentObserver.observe(content);
+    }
     void applyStep();
   });
 
   onDestroy(() => {
     window.removeEventListener("keydown", onKeydown);
     window.removeEventListener("resize", onResize);
+    contentObserver?.disconnect();
+    clearTimeout(glideTimer);
+    clearTimeout(findTimer);
   });
 </script>
 
@@ -325,7 +411,7 @@
 
   {#if spotRect}
     <div
-      class="tour-spotlight {reduce ? 'no-motion' : ''}"
+      class="tour-spotlight {reduce || !gliding ? 'no-motion' : ''}"
       style={spotStyle}
       in:fade={{ duration: reduce ? 0 : 280 }}
       aria-hidden="true"
@@ -344,11 +430,11 @@
     {#key i}
       <div
         in:cardIn
-        class="rounded-2xl border border-zinc-800 bg-layer-3 p-6 shadow-2xl shadow-black/40 ring-1 ring-white/[0.04] backdrop-blur"
+        class="rounded-2xl border border-zinc-800 bg-layer-3 p-6 shadow-2xl shadow-black/40 ring-1 ring-white/[0.04]"
       >
         <div class="flex items-start gap-3">
           <span
-            class="inline-flex h-11 w-11 shrink-0 items-center justify-center rounded-xl bg-emerald-600/15 text-emerald-400 ring-1 ring-emerald-500/25"
+            class="inline-flex h-11 w-11 shrink-0 items-center justify-center rounded-xl border border-emerald-800/80 bg-black text-emerald-500"
           >
             <StepIcon size={22} />
           </span>
@@ -380,35 +466,30 @@
 
     <!-- Progress + controls sit outside the {#key} so they don't re-animate on
          every step; only the content above flies in. -->
-    <div class="mt-4 flex items-center justify-center gap-1.5">
-      {#each steps as _s, idx (idx)}
-        <span
-          class="h-1.5 rounded-full transition-all duration-300 {idx === i
-            ? 'w-5 bg-emerald-500'
-            : idx < i
-              ? 'w-1.5 bg-emerald-500/70'
-              : 'w-1.5 bg-zinc-700'}"
-          aria-hidden="true"
-        ></span>
-      {/each}
+    <div class="mt-4">
+      <StepDots count={steps.length} current={i} />
     </div>
 
+    <!-- Pure black under all three, even on hover: only the border and the text
+         light up. -->
     <div class="mt-5 flex items-center justify-between gap-2">
       <button
         type="button"
         onclick={onClose}
-        class="rounded-lg border border-red-500/40 bg-red-500/10 px-3 py-2 text-sm font-medium text-red-300 transition hover:border-red-500/60 hover:bg-red-500/20 hover:text-red-200 focus:outline-none focus-visible:ring-2 focus-visible:ring-red-500/50"
+        class="rounded-[var(--radius-control)] border border-red-900/80 bg-black px-3 py-2 text-sm font-medium text-red-500 transition-colors hover:border-red-800 hover:text-red-400"
       >
         {$_("tour.skip")}
       </button>
       <div class="flex items-center gap-2">
         {#if !isFirst}
-          <Button variant="secondary" onclick={prev}>
+          <Button variant="muted" onclick={prev}>
+            <ArrowLeft size={16} data-anim="nudge-back" />
             {$_("tour.back")}
           </Button>
         {/if}
-        <Button variant="primary" size="lg" onclick={next}>
+        <Button variant="outline" size="lg" onclick={next}>
           {isLast ? $_("tour.start") : $_("tour.next")}
+          <ArrowRight size={16} data-anim="nudge" />
         </Button>
       </div>
     </div>

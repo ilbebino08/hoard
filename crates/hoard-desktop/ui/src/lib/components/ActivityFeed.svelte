@@ -159,7 +159,7 @@
      storage banner shares that corner and the two must not sit on top of each
      other. This is just the card. -->
 <aside
-  class="pointer-events-auto flex w-full flex-col rounded-lg border border-zinc-800 bg-layer-3 shadow-xl backdrop-blur"
+  class="pointer-events-auto flex w-full flex-col rounded-lg border border-zinc-800 bg-layer-3 shadow-xl"
   aria-label={$_("activity.panel_label")}
   transition:fly={{ y: 12, duration: 180 }}
 >

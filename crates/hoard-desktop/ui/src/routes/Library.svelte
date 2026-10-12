@@ -1119,7 +1119,7 @@
         <Gamepad2 size={16} data-anim="pop" />
         {$_("manual.add_button")}
       </Button>
-      <Button onclick={runScan} loading={scanning}>
+      <Button variant="outline" onclick={runScan} loading={scanning}>
         <RefreshCw size={16} data-anim="spin" />
         {scanning ? $_("library.scanning") : report ? $_("library.rescan") : $_("library.scan_now")}
       </Button>
@@ -1674,8 +1674,8 @@
           {$_("library.no_scan_body")}
         </p>
         <div class="mt-6">
-          <Button onclick={runScan}>
-            <RefreshCw size={16} />
+          <Button variant="outline" onclick={runScan}>
+            <RefreshCw size={16} data-anim="spin" />
             {$_("library.scan_now")}
           </Button>
         </div>

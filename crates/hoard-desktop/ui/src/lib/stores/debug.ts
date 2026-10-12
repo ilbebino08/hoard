@@ -35,6 +35,15 @@ export const debugDeviceLimit = writable<{
   plan: string;
 } | null>(null);
 
+/** Bumped from the panel to start the guided tour again from its first step. */
+export const debugTourRequest = writable(0);
+
+/** The wizard opened from the panel, to look at it with a session already in
+ *  place. Its own buttons then only move between steps: no OAuth, no sign-in,
+ *  and the last step does not rewrite the sync mode or autostart. The panel
+ *  turns it off as soon as the route leaves `/onboarding`. */
+export const wizardPreview = writable(false);
+
 export function setOverrides(patch: Partial<CloudAccount>): void {
   cloudOverrides.update(($o) => ({ ...($o ?? {}), ...patch }));
 }
@@ -102,7 +111,7 @@ export function applySurfaces(t: SurfaceTune | null): void {
     `oklch(${l.toFixed(3)} ${t.chroma.toFixed(3)} ${t.hue.toFixed(0)}${a === undefined ? "" : ` / ${a}%`})`;
   root.style.setProperty("--surface-1", c(t.panel, 62));
   root.style.setProperty("--surface-2", c(t.raised, 72));
-  root.style.setProperty("--surface-3", c(t.pop, 88));
+  root.style.setProperty("--surface-3", c(t.pop));
   root.style.setProperty("--surface-hover", c(t.panel + 0.035, 55));
   // The rail keeps the shape of its fade (the stylesheet's 70 / 45 / 30 %, a
   // touch lighter at the bottom) and only moves where it sits.
