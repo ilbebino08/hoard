@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 #
-# Strip host-provided graphics/Wayland libraries out of the built AppImage.
+# Prepare the built AppImage for Hoard's own installation and host graphics.
 #
 # Tauri's AppImage bundler copies WebKitGTK's dependency closure into the
 # bundle, which drags in libwayland-client/-egl/-cursor, libEGL, libGL(X),
@@ -14,8 +14,11 @@
 # marks "must come from the host". We extract the AppImage, delete them so the
 # dynamic loader falls through to the system copies, and repackage. The `.deb`
 # and `.rpm` are unaffected (they depend on system libs already), and the
-# in-app updater ships the `.deb` on Linux, so the repackaged AppImage needs no
-# updater signature, `release.yml` minisigns it afterwards.
+# release workflow signs the repackaged AppImage afterwards.
+#
+# Hoard installs its own menu entry and manages the AppImage's location. Opt
+# out of a second integration by AppImageLauncher inside the image itself:
+# setting the flag only in an external entry does not stop its binfmt handler.
 #
 # Usage: scripts/fix-appimage-libs.sh <bundle-root>
 #   <bundle-root> defaults to target/release/bundle; the script also probes
@@ -78,11 +81,24 @@ for pat in "${PATTERNS[@]}"; do
 done
 echo "fix-appimage-libs: removed $removed bundled lib(s)"
 
-if [ "$removed" -eq 0 ]; then
-  echo "fix-appimage-libs: nothing bundled — leaving original AppImage untouched"
-  popd >/dev/null
-  exit 0
+# Follow the root entry's symlink, keeping the AppDir layout intact. Only its
+# main section owns the integration policy; desktop actions stay unchanged.
+DESKTOP="$(find squashfs-root -maxdepth 1 -name '*.desktop' -print -quit)"
+if [ -z "$DESKTOP" ] || ! grep -q '^\[Desktop Entry\]$' "$DESKTOP"; then
+  echo "fix-appimage-libs: the AppImage has no main desktop entry" >&2
+  exit 1
 fi
+DESKTOP="$(readlink -f "$DESKTOP")"
+awk '
+  /^\[/ { main = ($0 == "[Desktop Entry]") }
+  main && /^X-AppImage-Integrate=/ { next }
+  { print }
+  $0 == "[Desktop Entry]" { print "X-AppImage-Integrate=false" }
+' "$DESKTOP" > "$WORK/desktop-entry"
+cat "$WORK/desktop-entry" > "$DESKTOP"
+
+# Repack even with no graphics libraries to remove: the opt-out must reach
+# the shipped image, including runners that already exclude all host libs.
 
 # Repackage with appimagetool. Fetch it once; ARCH must match the payload.
 ARCH="$(uname -m)"

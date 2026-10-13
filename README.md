@@ -70,6 +70,10 @@ at the same version, a NAS or a server stops at the engine and the terminal, a
 desktop or a Steam Deck gets the app too, in the same pass. Upgrades move
 everything together, so the pieces can't drift apart.
 
+On Linux, use Hoard's installer to install the AppImage and its menu icon.
+The AppImage opts out of AppImageLauncher integration, so another integration
+prompt cannot interrupt Hoard's own login startup or create a duplicate launcher.
+
 In game mode there is nothing to keep open: the engine runs as a background
 service that starts with your session, so your saves sync with no window and no
 terminal.
